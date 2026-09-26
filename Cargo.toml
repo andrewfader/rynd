@@ -1,0 +1,21 @@
+[package]
+name = "rynd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lib]
+name = "rynd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rynd"
+path = "src/main.rs"
+
+[[bench]]
+name = "rynd_benchmarks"
+harness = false
+

@@ -1,0 +1,24 @@
+# Fibonacci implementation in Rynd
+# Demonstrates clean function definitions, if-expressions, and pattern matching
+
+fn fib_recursive(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib_recursive(n - 1) + fib_recursive(n - 2)
+    }
+}
+
+fn fib_match(n) {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => fib_match(n - 1) + fib_match(n - 2)
+    }
+}
+
+println("Recursive fib(10):")
+println(fib_recursive(10))
+
+println("Match fib(10):")
+println(fib_match(10))

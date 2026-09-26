@@ -1,0 +1,9 @@
+# Prices are integer cents. Implementation helpers remain private.
+fn line_total(item) { item.price_cents * item.quantity }
+
+pub fn subtotal(items) { items |> map(line_total) |> sum() }
+pub fn shipping(cents) { cents >= 5000 ? 0 : 500 }
+pub fn receipt(items) {
+    let cents = subtotal(items)
+    {"subtotal": cents, "shipping": shipping(cents), "total": cents + shipping(cents)}
+}

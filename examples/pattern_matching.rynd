@@ -1,0 +1,17 @@
+# Pattern matching example in Rynd
+# Shows matching with literals and variables
+
+fn describe_status(code) {
+    match code {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        other => "Unhandled Code: " + to_string(other)
+    }
+}
+
+println("Status 200: " + describe_status(200))
+println("Status 404: " + describe_status(404))
+println("Status 999: " + describe_status(999))

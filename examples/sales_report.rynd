@@ -1,0 +1,17 @@
+# Simple tab-separated records: customer name, amount in integer cents.
+# No header, quoting, or embedded tabs. Blank lines are ignored.
+# rynd run examples/sales_report.rynd -- examples/data/sales.tsv 2000
+# cat examples/data/sales.tsv | rynd run examples/sales_report.rynd
+let text = if len(args) > 0 { read_text(args[0]) } else { read_stdin() }
+let threshold = if len(args) > 1 { parse_int(args[1]) } else { 2000 }
+let rows = text |> lines() |> filter(\line -> trim(line) != "")
+let sales = rows |> map(\line -> {
+    let [customer, cents] = split(line, "\t")
+    {"customer": trim(customer), "cents": parse_int(cents)}
+})
+let total = sales |> map(\sale -> sale.cents) |> sum()
+let large = sales |> filter(\sale -> sale.cents >= threshold)
+    |> map(\sale -> sale.customer) |> join(", ")
+println("Sales: " + len(sales))
+println("Total cents: " + total)
+println("Customers at or above " + threshold + " cents: " + large)

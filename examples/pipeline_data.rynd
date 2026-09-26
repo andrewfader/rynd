@@ -1,0 +1,16 @@
+# Pipeline data transformation example in Rynd
+# Shows Elixir-style chaining using the |> operator
+
+let raw_data = range(1, 21)
+
+println("Initial dataset (1 to 20):")
+println(raw_data)
+
+# Process data: filter evens, double them, and sum
+let total = raw_data
+    |> filter(\n -> n % 2 == 0)
+    |> map(\n -> n * 2)
+    |> sum()
+
+println("Sum of doubled evens:")
+println(total)

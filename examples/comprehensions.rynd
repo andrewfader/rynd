@@ -1,0 +1,17 @@
+# Comprehensions example in Rynd
+# Shows CoffeeScript / Python style list comprehensions
+
+let numbers = range(1, 11)
+
+println("Original numbers:")
+println(numbers)
+
+# Compute squares of numbers greater than 5
+let squares = [x * x for x in numbers if x > 5]
+
+println("Squares of numbers > 5:")
+println(squares)
+
+# Aggregate with sum()
+println("Sum of squares:")
+println(sum(squares))

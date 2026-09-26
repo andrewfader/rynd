@@ -1,0 +1,11 @@
+import "pricing.rynd" as pricing
+
+let basket = [
+    {"name": "Notebook", "price_cents": 1200, "quantity": 2},
+    {"name": "Pen set", "price_cents": 1800, "quantity": 1}
+]
+let receipt = pricing.receipt(basket)
+println("Subtotal: #{receipt.subtotal} cents")
+println("Shipping: #{receipt.shipping} cents")
+println("Total: #{receipt.total} cents")
+unless receipt.shipping == 0 { println("Free shipping starts at 5000 cents") }
