@@ -1,0 +1,9 @@
+# rynd run examples/json_report.rynd -- examples/data/issues.json
+let path = args[0] ?: "examples/data/issues.json"
+let issues = read_text(path) |> parse_json() |> filter(\issue -> issue.open)
+let report = {
+    "top": issues |> sort_by(\issue -> -issue.votes) |> take(3) |> map(\issue -> issue.title),
+    "teams": issues |> group_by(\issue -> issue.team) |> keys(),
+    "votes": issues |> map(\issue -> issue.votes) |> sum()
+}
+println(to_json(report))

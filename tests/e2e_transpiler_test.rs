@@ -726,3 +726,65 @@ fn inspired_expression_semantics() {
         false,
     );
 }
+
+#[test]
+fn data_pipeline_native_contract() {
+    verify(
+        "data_pipeline",
+        r#"
+        let rows = parse_json("[{\"name\":\"Ada\",\"team\":\"compiler\",\"score\":3},{\"name\":\"Grace\",\"team\":\"compiler\",\"score\":5}]")
+        println(rows |> sort_by(\row -> -row.score) |> map(\row -> row.name) |> to_json())
+        println(rows |> group_by(\row -> row.team) |> keys() |> to_json())
+        println({"b":2,"a":1} |> entries() |> to_map() |> to_json())
+        println({"b":2,"a":1} |> values() |> to_json())
+        println([3,1,2] |> sort() |> skip(1) |> take(1) |> to_json())
+        println([1,2] |> enumerate())
+        println(zip([1,2], [3]))
+        println([1,2] |> flat_map(\x -> [x,x*10]) |> to_json())
+        println([0,1,2] |> filter_map(\x -> x % 2 == 0 ? Some(x) : None) |> to_json())
+        fn pred(x) { println(x); x == 1 }
+        println(any([0,1,2], pred))
+        println(all([1,0,2], pred))
+        println(find([0,1,2], pred))
+        println(parse_json("null"))
+    "#,
+        Some(
+            "[\"Grace\",\"Ada\"]\n[\"compiler\"]\n{\"a\":1,\"b\":2}\n[1,2]\n[2]\n[(0, 1), (1, 2)]\n[(1, 3)]\n[1,10,2,20]\n[0,2]\n0\n1\ntrue\n1\n0\nfalse\n0\n1\nSome(1)\nnil\n",
+        ),
+        false,
+    );
+}
+
+#[test]
+fn recoverable_errors_native_contract() {
+    verify(
+        "recoverable_errors",
+        r#"
+        fn fail(x) { println(x); 100 + 1/0 }
+        fn recover(x) { 10 + match attempt(fail, [x]) { Err(e) => 7, _ => 0 } }
+        println(map([1,2], recover))
+        println(attempt(parse_int, ["no"]).tag)
+        println(attempt(abs, [-3]))
+        println(attempt(abs, []).tag)
+        println(attempt(1, []).tag)
+        println(attempt(map, [[3], fail]).tag)
+        println(attempt(parse_json, ["[1,]"]).tag)
+        println(attempt(sort, [[1,"a"]]).tag)
+        println(attempt(sort, [[0.0 / 0.0]]).tag)
+        println(attempt(to_json, [Some(1)]).tag)
+        println(attempt(filter_map, [[1], abs]).tag)
+        println(attempt(flat_map, [[1], abs]).tag)
+        println(attempt(group_by, [[1], abs]).tag)
+        println(40+2)
+    "#,
+        Some(
+            "1\n2\n[17, 17]\nErr\nOk(3)\nErr\nErr\n3\nErr\nErr\nErr\nErr\nErr\nErr\nErr\nErr\n42\n",
+        ),
+        false,
+    );
+}
+
+#[test]
+fn json_errors_retain_source_locations_on_both_targets() {
+    verify("json_error", "parse_json(\"[1,]\")", Some(""), true);
+}

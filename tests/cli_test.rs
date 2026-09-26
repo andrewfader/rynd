@@ -368,3 +368,28 @@ fn build_produces_executable_and_preserves_input_on_failures() {
     assert_eq!(fs::read(&source).unwrap(), original);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cli_json_pipe() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let bin = env!("CARGO_BIN_EXE_rynd");
+    let mut child = Command::new(bin)
+        .args([
+            "eval",
+            "read_stdin() |> parse_json() |> sort_by(\\x -> x.n) |> to_json()",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"[{\"n\":2},{\"n\":1}]")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"[{\"n\":1},{\"n\":2}]\n");
+}

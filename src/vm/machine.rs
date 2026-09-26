@@ -301,6 +301,12 @@ impl Machine {
     fn peek(&self) -> RyndResult<&Value> {
         self.stack.last().ok_or_else(|| error("Stack underflow"))
     }
+    // Error recovery is cold; keep frame destruction out of callback dispatch.
+    #[cold]
+    fn unwind_call(&mut self, depth: usize, stack_len: usize) {
+        self.frames.truncate(depth);
+        self.stack.truncate(stack_len);
+    }
     pub fn call_function_internal(&mut self, callee: Value, args: Vec<Value>) -> RyndResult<Value> {
         self.call(callee, args)
     }
@@ -311,10 +317,17 @@ impl Runtime for Machine {
         match callee {
             Value::Closure { .. } | Value::Function { .. } => {
                 let depth = self.frames.len();
+                let stack_len = self.stack.len();
                 let mut locals = self.local_pool.pop().unwrap_or_default();
                 locals.extend_from_slice(args);
                 self.push_frame(callee.clone(), locals)?;
-                self.run_until_depth(depth)
+                match self.run_until_depth(depth) {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        self.unwind_call(depth, stack_len);
+                        Err(error)
+                    }
+                }
             }
             Value::Native { func, .. } => func(args),
             Value::Builtin { name, .. } => runtime::call_builtin(self, name, args),

@@ -34,6 +34,10 @@ impl RustTranspiler {
         out.push_str(include_str!("../vm/value.rs"));
         out.push_str("\n} pub mod runtime {\n");
         out.push_str(include_str!("../vm/runtime.rs"));
+        out.push_str("\n} pub mod json {\n");
+        out.push_str(include_str!("../vm/json.rs"));
+        out.push_str("\n} pub mod collections {\n");
+        out.push_str(include_str!("../vm/collections.rs"));
         out.push_str("\n}}\n");
         out.push_str("use error::{RyndResult, Span};\nuse syntax::ast::{Pattern, Literal, BinaryOp, UnaryOp};\nuse vm::value::Value;\nuse vm::runtime::{self, Runtime};\nuse std::rc::Rc;\nfn rynd_program(__rt: &mut dyn Runtime) -> RyndResult<Value> {\n");
         out.push_str(&self.program_body(program)?);

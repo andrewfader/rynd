@@ -90,7 +90,7 @@ fn execute() -> Result<(), String> {
                     }
                 )
             })?;
-            let program = if command == "run" {
+            let program = if command == "run" && input == "-" {
                 source(input)?
             } else {
                 input.clone()

@@ -1,0 +1,6 @@
+[
+  {"title": "Cache compiled rules", "team": "runtime", "votes": 18, "open": true},
+  {"title": "Ship JSON pipelines", "team": "data", "votes": 42, "open": true},
+  {"title": "Fix stale frames", "team": "runtime", "votes": 12, "open": false},
+  {"title": "Improve diagnostics", "team": "tooling", "votes": 27, "open": true}
+]

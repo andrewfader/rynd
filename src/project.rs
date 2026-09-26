@@ -219,5 +219,7 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/vm/mod.rs", include_str!("vm/mod.rs")),
     ("src/vm/opcode.rs", include_str!("vm/opcode.rs")),
     ("src/vm/runtime.rs", include_str!("vm/runtime.rs")),
+    ("src/vm/json.rs", include_str!("vm/json.rs")),
+    ("src/vm/collections.rs", include_str!("vm/collections.rs")),
     ("src/vm/value.rs", include_str!("vm/value.rs")),
 ];

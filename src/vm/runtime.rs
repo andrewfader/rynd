@@ -26,6 +26,24 @@ pub trait Runtime {
 pub fn globals() -> HashMap<String, Value> {
     let mut globals = HashMap::new();
     for (name, arity) in [
+        ("parse_json", 1),
+        ("to_json", 1),
+        ("attempt", 2),
+        ("sort", 1),
+        ("sort_by", 2),
+        ("group_by", 2),
+        ("keys", 1),
+        ("values", 1),
+        ("entries", 1),
+        ("take", 2),
+        ("skip", 2),
+        ("any", 2),
+        ("all", 2),
+        ("find", 2),
+        ("filter_map", 2),
+        ("flat_map", 2),
+        ("enumerate", 1),
+        ("zip", 2),
         ("map", 2),
         ("filter", 2),
         ("reduce", 3),
@@ -325,6 +343,19 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
         }
     }
     match name {
+        "parse_json" => super::json::parse(string(&args[0])?),
+        "to_json" => super::json::stringify(&args[0]).map(Value::string),
+        "attempt" => match rt.call_ref(&args[0], list(&args[1])?) {
+            Ok(value) => Ok(Value::variant("Ok", vec![value])),
+            Err(error) => Ok(Value::variant(
+                "Err",
+                vec![Value::string(error.to_string())],
+            )),
+        },
+        "sort" | "sort_by" | "group_by" | "keys" | "values" | "entries" | "take" | "skip"
+        | "any" | "all" | "find" | "filter_map" | "flat_map" | "enumerate" | "zip" => {
+            super::collections::call(rt, name, args)
+        }
         "lines" => Ok(Value::list(
             string(&args[0])?.lines().map(Value::string).collect(),
         )),

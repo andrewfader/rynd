@@ -1,5 +1,73 @@
 # Measured performance
 
+## Data workflow additions — 2026-09-26
+
+Measured with `cargo bench --offline --bench rynd_benchmarks`, rustc 1.97.0,
+on the Intel Core i9-10850K host described below. Tests and coverage had finished
+before timing. The unchanged `f8d38c1` source was archived into a separate local
+build directory and measured on the same host for comparison. The machine was
+not isolated or frequency-pinned; these are workload-specific observations.
+
+All numbers are microseconds per operation. Three warmup batches precede 20
+samples; intervals use the same Student-t method described below.
+
+| Workload | Mean | Median | 95% interval |
+| --- | ---: | ---: | --- |
+| VM `filter` + `head`, first item matches among 10,000 | 765.372 | 762.003 | 760.454–770.290 |
+| VM `find`, same first-match input | 0.272 | 0.270 | 0.268–0.276 |
+| VM `filter` + `map` + `sum`, 10,000 items | 1605.256 | 1600.952 | 1596.897–1613.614 |
+| VM `filter_map` + `sum`, same transformation | 2090.699 | 2083.382 | 2082.360–2099.038 |
+
+These scripts reuse compiled bytecode and the same already-allocated input.
+`find` uses 200 iterations per batch; the other rows use two. `find` performs one
+predicate call here; `filter` performs 10,000 and builds its output before `head`.
+This is a best-case search improvement, not a general VM speedup. Matches near
+the end, or missing matches, still require a full scan.
+
+`filter_map` creates one output list and combines selection/transformation in one
+traversal, but is about **30% slower** on this cheap arithmetic workload. Tagged
+`Some` construction and callback work have a cost. Choose it for composition and
+fewer intermediate lists; timing depends on the callback and workload.
+
+| Existing workload, precompiled/in-process | Unchanged source mean | Current mean |
+| --- | ---: | ---: |
+| VM `fib(18)` | 1351.248 | 1349.010 |
+| VM pipeline including range creation | 1725.120 | 1760.793 |
+| Native pipeline excluding startup | 703.462 | 697.243 |
+
+The existing VM pipeline is about 2% slower in these observations; Fibonacci and
+native execution remain close to baseline. No across-the-board speedup is claimed.
+Native compilation was 645.97 ms in the final run versus 526.48 ms in the baseline
+(single observations). The generated runtime now includes the JSON and collection
+implementations. Raw local results are `target/adoption-benchmarks.log` and
+`target/adoption-baseline-benchmarks.log`.
+
+A VM instruction-budget prototype was measured and removed after it slowed
+existing workloads. The delivered VM keeps the original dispatch loop; error
+recovery restores frame/operand boundaries through a cold cleanup path. Execution
+budgets remain follow-up work in [REVIEW.md](REVIEW.md).
+
+Reproduce correctness and interoperability checks:
+
+```sh
+sh scripts/check.sh
+sh scripts/coverage.sh
+cargo bench --offline --bench rynd_benchmarks
+```
+
+All **131 tests pass in each of debug and release**. The check script includes
+formatting, Clippy with warnings
+as errors, module/Cargo/native workflows, 35 VM/native program probes, three REPL
+probes, the README Rust example, two benchmark-failure probes, and independent
+Python JSON comparisons (124 successful inputs and 20 rejections per target).
+Final source-line coverage is **91.18% (3,858 / 4,231 lines)**; the configured
+90% gate passes. JSON and collection modules measure 99.58% and 99.13%
+respectively. Tests and generated copies are excluded from these line totals.
+Local validation logs are `target/adoption-checks.log` and
+`target/adoption-coverage.log`.
+
+## Earlier overlay measurements
+
 Measured on 2026-09-26 using `cargo bench --offline --bench rynd_benchmarks`
 after the Rynd overlay, semantics, and runtime changes. Host: Intel Core i9-10850K CPU @ 3.60 GHz,
 x86_64 Linux 7.3.0-rc3-1-cachyos-rc. Toolchain: rustc 1.97.0

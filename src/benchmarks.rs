@@ -138,6 +138,47 @@ fn main() {
             stats::measure(|| check(vm.run().map_err(|e| e.to_string())?, expected), 2)?
         );
     }
+    // Reuse identical inputs and compiled scripts to isolate collection work.
+    for (name, source, expected) in [
+        (
+            "filter + head (first match)",
+            r"head(filter(items, \x -> x == 1))",
+            Value::Int(1),
+        ),
+        (
+            "find (first match)",
+            r"find(items, \x -> x == 1)",
+            Value::variant("Some", vec![Value::Int(1)]),
+        ),
+        (
+            "filter + map + sum",
+            r"items |> filter(\x -> x % 2 == 0) |> map(\x -> x * 2) |> sum()",
+            Value::Int(50010000),
+        ),
+        (
+            "filter_map + sum",
+            r"items |> filter_map(\x -> x % 2 == 0 ? Some(x * 2) : None) |> sum()",
+            Value::Int(50010000),
+        ),
+    ] {
+        let mut engine = RyndEngine::new();
+        engine.set_global("items", Value::list((1..10001).map(Value::Int).collect()));
+        let script = engine.compile(source).map_err(|e| e.to_string())?;
+        println!(
+            "VM {name}, precompiled, input reused: {}",
+            stats::measure(
+                || {
+                    let value = engine.run(&script).map_err(|e| e.to_string())?;
+                    if value != expected {
+                        return Err(format!("Wrong {name} result: {value}"));
+                    }
+                    black_box(value);
+                    Ok(())
+                },
+                if name.starts_with("find") { 200 } else { 2 }
+            )?
+        );
+    }
     let native = Command::new(&bin).output().map_err(|e| e.to_string())?;
     if !native.status.success() {
         return Err(format!(

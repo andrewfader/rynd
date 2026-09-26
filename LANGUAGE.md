@@ -129,9 +129,96 @@ and do not cross threads; create independent runtimes or convert to Rust data.
 Script call depth is bounded at 256. The VM has no untrusted-code sandbox,
 CPU timeout, or memory quota. Native adapters have normal Rust process authority.
 There is no Elixir actor/OTP runtime, distributed scheduler, debugger, automatic
-Rust binding generator, or built-in full CSV/JSON implementation. Those are not
+Rust binding generator, or built-in full CSV implementation. Those are not
 implied by the syntax influences. Rust crates provide such application services
 through the tested adapter boundary.
 
-See README for the builtin reference, executable workflows and verification;
+See README for executable workflows and verification;
 BENCHMARKS records measured performance rather than a machine-independent claim.
+
+## Core builtins
+
+`map(xs, f)`, `filter(xs, predicate)`, and `reduce(xs, initial, f)` produce
+transformed lists or a folded value; reduce callbacks receive accumulator and item.
+`sum(xs)` adds numbers with checked integer arithmetic. `range(start, end)` builds
+integers up to the exclusive end. `head(xs)` returns the first item or nil;
+`tail(xs)`, `push(xs, value)`, and `concat(xs, ys)` create new lists.
+`to_map(pairs)` accepts two-element tuples/lists, with last-entry-wins keys.
+`len(value)` counts collection entries or Unicode scalar values in strings.
+`abs(x)`, `min(x, y)`, and `max(x, y)` operate on numbers.
+
+`lines(text)` splits LF/CRLF lines and omits a terminal empty line.
+`split(text, separator)` splits literally and retains empty fields;
+`trim(text)` removes surrounding Unicode whitespace; `join(strings, separator)`
+joins strings. `parse_int(text)` parses a trimmed decimal i64 and
+`parse_float(text)` a trimmed finite f64. `contains(value, item)` checks substring,
+list/tuple membership, or map-key presence. Invalid conversions return errors.
+
+`read_text(path)` and `read_stdin()` read all UTF-8 text from a file or stdin.
+`to_string(value)` uses Rynd display formatting; `print(value)` and
+`println(value)` write it. `args` contains script argument strings. `Some(x)`,
+`None`, `Ok(x)`, and `Err(x)` construct tagged values for pattern matching.
+
+## JSON and collection pipelines
+
+`parse_json(text)` reads JSON data into nil, booleans, signed i64 integers,
+finite f64 numbers, strings, lists, and string-keyed maps. `to_json(value)` emits
+compact JSON with sorted object keys and escaped strings. Both work in the VM,
+standalone executables, and Cargo projects.
+
+Integer tokens preserve all 64 bits; values outside i64 produce an error. Decimal
+and exponent tokens use f64 rounding. Duplicate object keys keep the last value.
+Unicode escapes support surrogate pairs; lone surrogates produce errors. Parsing
+and encoding allow up to 128 nested containers. JSON conversion reports errors for
+unsupported values (functions, tuples, variants, NaN, infinity), malformed syntax,
+and trailing input. Parse errors include a one-based byte position. Strings are
+data, including any text that resembles Rynd interpolation.
+
+```rynd
+let data = "[{\"name\":\"Ada\",\"score\":42}]" |> parse_json()
+data |> sort_by(\row -> -row.score) |> to_json()
+```
+
+Collection helpers take the collection first, so each composes with `|>`.
+All return new values and preserve their inputs.
+
+| Function | Behavior |
+| --- | --- |
+| `sort(xs)` | Stable ascending numeric or string order. Mixed integers/floats compare precisely; NaN and incompatible types produce errors. |
+| `sort_by(xs, key)` | Stable ascending order by a unary key function; computes each key once, in input order. Negate numeric keys for descending order. |
+| `group_by(xs, key)` | Map of string keys to lists; preserves input order within each group. Requires string keys. |
+| `keys(map)`, `values(map)`, `entries(map)` | Sorted key order; entries are `(key, value)` tuples usable with `to_map`. |
+| `take(xs, n)`, `skip(xs, n)` | First n / remaining items. Counts are nonnegative integers, capped at the input length. |
+| `enumerate(xs)` | `(index, value)` tuples, starting at zero. |
+| `zip(xs, ys)` | Pairs through the shorter input's length. |
+| `any(xs, predicate)`, `all(xs, predicate)` | Short-circuit using truthiness. Empty input returns false / true respectively. |
+| `find(xs, predicate)` | First matching item as `Some(value)`, or `None`; short-circuits. |
+| `filter_map(xs, f)` | One pass; keeps the payload of `Some(value)`, skips `None`. Preserves falsey payloads such as zero and nil. |
+| `flat_map(xs, f)` | Concatenates the lists returned by f, in input order. |
+
+These operations use eager lists. `find`, `any`, and `all` avoid scanning the tail
+once their answer is known. `filter_map` combines selection and transformation
+into a single traversal and output list; tagged-value allocation and callbacks
+still have a cost. `sort_by` caches keys before its O(n log n) stable sort. Each
+unary callback is arity-checked even for an empty input.
+
+## Recoverable errors
+
+`attempt(function, argument_list)` returns `Ok(value)` or `Err(message)` for a
+runtime failure. Use pattern matching to recover at the point that owns the
+policy. An ordinary returned `Err(value)` is data and becomes `Ok(Err(value))`.
+
+```rynd
+fn parse_or_zero(text) {
+    match attempt(parse_int, [text]) {
+        Ok(value) => value,
+        Err(message) => 0
+    }
+}
+["10", "bad", "20"] |> map(parse_or_zero) |> sum() # 30
+```
+
+Failed calls release their execution frames and temporary operands. Completed
+output and host effects remain visible. Arguments are evaluated before entering
+`attempt`; wrap an expression in a zero-argument lambda to catch its evaluation:
+`attempt(\ -> 1 / 0, [])`. Host panics propagate outside this recovery mechanism.

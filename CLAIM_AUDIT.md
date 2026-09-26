@@ -1,5 +1,9 @@
 # Agy transcript claim audit
 
+The counts below record the earlier overlay delivery. Subsequent JSON,
+collection and recovery work is documented in
+[REVIEW.md](REVIEW.md); see [BENCHMARKS.md](BENCHMARKS.md) for its validation.
+
 ## Rynd application/library overlay delivery
 
 The overall language, CLI, crate, API, examples, and source extension are now
