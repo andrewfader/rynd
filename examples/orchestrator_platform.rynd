@@ -1,0 +1,75 @@
+# Terraform & Puppet-style Orchestration Platform in Rynd
+# Demonstrates: Declarative resources, state reconciliation, structured nurseries, and actor mailboxes
+
+# 1. State Store and Resource Representation
+fn make_resource(res_type, name, desired_config) {
+    {
+        "id": "#{res_type}.#{name}",
+        "type": res_type,
+        "name": name,
+        "config": desired_config,
+        "status": "pending"
+    }
+}
+
+# 2. Resource Provisioner using Structured Concurrency Nurseries
+fn provision_resource(res) {
+    # Simulate provisioning workload
+    let provisioned_props = {
+        "ip": "10.0.1.#{len(res.name) * 10}",
+        "provisioned_at": "2026-09-27T05:00:00Z"
+    }
+    
+    res
+    |> put("status", "ready")
+    |> put("output", provisioned_props)
+}
+
+# 3. Cluster Node Agent as an Actor
+fn create_node_agent(node_name) {
+    spawn_actor(\mb -> {
+        # Agent event loop: receives task and replies with heartbeat status
+        let task = receive(mb)
+        let processed = task |> put("status", "executed_on_#{node_name}")
+        processed
+    })
+}
+
+# 4. Declarative Manifest / Plan Execution
+let desired_resources = [
+    make_resource("compute_instance", "web_frontend", {"cores": 4, "ram_gb": 16}),
+    make_resource("compute_instance", "api_backend", {"cores": 8, "ram_gb": 32}),
+    make_resource("database_cluster", "primary_postgres", {"storage_gb": 500}),
+    make_resource("load_balancer", "edge_proxy", {"algorithm": "round_robin"})
+]
+
+println("==> Planning infrastructure deployment (4 resources)...")
+
+# Execute provisioning in a structured nursery:
+# If any resource fails, the nursery cancels siblings and propagates the failure.
+let provisioned = nursery(\n -> {
+    desired_resources
+    |> each(\res -> {
+        n.spawn(\ -> {
+            let res_done = provision_resource(res)
+            println(" [Provisioned] #{res_done.id} -> IP #{res_done.output.ip}")
+            res_done
+        })
+    })
+})
+
+println("\n==> Dispatching work to Node Agent Actors...")
+let worker_node = create_node_agent("worker-az-1a")
+send(worker_node, {"action": "sync_secrets", "cluster": "prod-east"})
+
+let agent_response = await_fiber(worker_node)
+println(" [Agent Result] Action '#{agent_response.action}' -> #{agent_response.status}")
+
+println("\n==> Reconciling final cluster state...")
+let state = {
+    "cluster": "k8s.rynd.internal",
+    "version": "v1.32.0",
+    "resources": provisioned
+}
+
+println("Final state has #{len(state.resources)} active resources. Cluster status: HEALTHY")

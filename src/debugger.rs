@@ -360,15 +360,16 @@ impl<R: BufRead, W: Write> DebugHook for DebugSession<R, W> {
             if bp.line != span.line {
                 continue;
             }
-            if let Some(file) = &bp.file {
-                let matches = span.file.as_ref().is_some_and(|current| {
-                    current.as_ref() == file
-                        || Path::new(file).canonicalize().ok().as_deref()
-                            == Some(Path::new(current.as_ref()))
-                });
-                if !matches {
-                    continue;
+            let file_matches = match (&bp.file, &span.file) {
+                (Some(expected), Some(current)) => {
+                    current.as_ref() == expected
+                        || Path::new(current.as_ref()) == Path::new(expected)
                 }
+                (None, None) => true,
+                _ => false,
+            };
+            if !file_matches {
+                continue;
             }
             if let Some(condition) = &bp.condition {
                 let (result, output) = machine.debug_eval(0, condition);

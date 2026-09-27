@@ -237,7 +237,7 @@ impl Parser {
             if !self.check(&TokenType::RParen) {
                 loop {
                     sub_patterns.push(self.parse_pattern()?);
-                    if !self.match_token(&[TokenType::Comma]) {
+                    if !self.match_token(&[TokenType::Comma]) || self.check(&TokenType::RParen) {
                         break;
                     }
                 }
@@ -250,7 +250,7 @@ impl Parser {
             if !self.check(&TokenType::RBracket) {
                 loop {
                     sub_patterns.push(self.parse_pattern()?);
-                    if !self.match_token(&[TokenType::Comma]) {
+                    if !self.match_token(&[TokenType::Comma]) || self.check(&TokenType::RBracket) {
                         break;
                     }
                 }
@@ -260,6 +260,7 @@ impl Parser {
         } else if self.match_token(&[TokenType::Some]) {
             self.consume(TokenType::LParen, "Expected '(' after Some")?;
             let inner = self.parse_pattern()?;
+            self.match_token(&[TokenType::Comma]);
             self.consume(TokenType::RParen, "Expected ')' after Some pattern")?;
             Ok(Pattern::Variant {
                 name: "Some".to_string(),
@@ -273,6 +274,7 @@ impl Parser {
         } else if self.match_token(&[TokenType::Ok]) {
             self.consume(TokenType::LParen, "Expected '(' after Ok")?;
             let inner = self.parse_pattern()?;
+            self.match_token(&[TokenType::Comma]);
             self.consume(TokenType::RParen, "Expected ')' after Ok pattern")?;
             Ok(Pattern::Variant {
                 name: "Ok".to_string(),
@@ -281,6 +283,7 @@ impl Parser {
         } else if self.match_token(&[TokenType::Err]) {
             self.consume(TokenType::LParen, "Expected '(' after Err")?;
             let inner = self.parse_pattern()?;
+            self.match_token(&[TokenType::Comma]);
             self.consume(TokenType::RParen, "Expected ')' after Err pattern")?;
             Ok(Pattern::Variant {
                 name: "Err".to_string(),
@@ -303,7 +306,9 @@ impl Parser {
                         if !self.check(&TokenType::RParen) {
                             loop {
                                 args.push(self.parse_pattern()?);
-                                if !self.match_token(&[TokenType::Comma]) {
+                                if !self.match_token(&[TokenType::Comma])
+                                    || self.check(&TokenType::RParen)
+                                {
                                     break;
                                 }
                             }
@@ -428,7 +433,9 @@ impl Parser {
                     if !self.check(&TokenType::RParen) {
                         loop {
                             elements.push(self.parse_expression(Precedence::Lowest)?);
-                            if !self.match_token(&[TokenType::Comma]) {
+                            if !self.match_token(&[TokenType::Comma])
+                                || self.check(&TokenType::RParen)
+                            {
                                 break;
                             }
                         }
@@ -449,6 +456,7 @@ impl Parser {
                 self.advance();
                 self.consume(TokenType::LParen, "Expected '(' after Some")?;
                 let inner = self.parse_expression(Precedence::Lowest)?;
+                self.match_token(&[TokenType::Comma]);
                 self.consume(TokenType::RParen, "Expected ')' after Some expression")?;
                 Ok(Expr::new(
                     ExprKind::Call {
@@ -469,6 +477,7 @@ impl Parser {
                 self.advance();
                 self.consume(TokenType::LParen, "Expected '(' after Ok")?;
                 let inner = self.parse_expression(Precedence::Lowest)?;
+                self.match_token(&[TokenType::Comma]);
                 self.consume(TokenType::RParen, "Expected ')' after Ok expression")?;
                 Ok(Expr::new(
                     ExprKind::Call {
@@ -485,6 +494,7 @@ impl Parser {
                 self.advance();
                 self.consume(TokenType::LParen, "Expected '(' after Err")?;
                 let inner = self.parse_expression(Precedence::Lowest)?;
+                self.match_token(&[TokenType::Comma]);
                 self.consume(TokenType::RParen, "Expected ')' after Err expression")?;
                 Ok(Expr::new(
                     ExprKind::Call {
@@ -943,7 +953,8 @@ impl Parser {
                 if !self.check(&TokenType::RParen) {
                     loop {
                         args.push(self.parse_expression(Precedence::Lowest)?);
-                        if !self.match_token(&[TokenType::Comma]) {
+                        if !self.match_token(&[TokenType::Comma]) || self.check(&TokenType::RParen)
+                        {
                             break;
                         }
                     }

@@ -1,0 +1,101 @@
+# Sinatra & Phoenix-style Web Framework in Rynd
+# Demonstrates: Plugs, Route matching, Sub-app Engines, and HTTP Streaming
+
+# Middleware Plugs
+fn plug_logger(conn) {
+    println("[LOG] #{conn.method} #{conn.path}")
+    put_resp_header(conn, "x-powered-by", "Rynd/1.0-Sinatra")
+}
+
+fn plug_cors(conn) {
+    put_resp_header(conn, "access-control-allow-origin", "*")
+}
+
+# Sub-App / Engine (like Rails Engines or Phoenix sub-routers)
+fn admin_engine(conn) {
+    if conn.halted { return conn }
+
+    let m_dash = match_route(conn.path, "/dashboard")
+    if m_dash.tag == "Some" {
+        return html_response(conn, 200, "<h1>Admin Dashboard: All Systems Operational</h1>")
+    }
+
+    let m_metrics = match_route(conn.path, "/metrics")
+    if m_metrics.tag == "Some" {
+        return json_response(conn, 200, {
+            "memory_mb": 14.2,
+            "active_fibers": 8,
+            "uptime_secs": 3600
+        })
+    }
+
+    text_response(conn, 404, "Admin resource not found")
+}
+
+# Mount helper for composable engines
+fn mount(conn, prefix, engine_handler) {
+    if conn.halted { return conn }
+    if contains(conn.path, prefix) {
+        let sub_path = split(conn.path, prefix)[1]
+        let target_path = if sub_path == "" { "/" } else { sub_path }
+        let sub_conn = conn |> put("path", target_path)
+        let handled = engine_handler(sub_conn)
+        return handled |> put("path", conn.path)
+    }
+    conn
+}
+
+# Core Application Router
+fn app_router(conn) {
+    if conn.halted { return conn }
+
+    # Route: GET /
+    let m_root = match_route(conn.path, "/")
+    if m_root.tag == "Some" and conn.method == "GET" {
+        return html_response(conn, 200, "<h1>Welcome to Rynd Web Framework!</h1>")
+    }
+
+    # Route: GET /api/users/:id
+    let m_user = match_route(conn.path, "/api/users/:id")
+    if m_user.tag == "Some" and conn.method == "GET" {
+        let user_id = m_user.value.id
+        return json_response(conn, 200, {
+            "id": user_id,
+            "role": "engineer",
+            "active": true
+        })
+    }
+
+    # Route: POST /api/deploy
+    let m_deploy = match_route(conn.path, "/api/deploy")
+    if m_deploy.tag == "Some" and conn.method == "POST" {
+        let payload = parse_json(conn.body)
+        return json_response(conn, 201, {
+            "status": "deployed",
+            "service": payload.service
+        })
+    }
+
+    # Fallback 404
+    text_response(conn, 404, "Not Found")
+}
+
+# Pipeline handler combining Plugs, Engines, and Routes
+fn handle_connection(raw_conn) {
+    raw_conn
+    |> plug_logger()
+    |> plug_cors()
+    |> mount("/admin", admin_engine)
+    |> app_router()
+}
+
+# Test the pipeline in-memory
+let test_req1 = conn("GET", "/api/users/42") |> handle_connection()
+let test_req2 = conn("GET", "/admin/metrics") |> handle_connection()
+let test_req3 = conn("POST", "/api/deploy")
+    |> put("body", '{"service": "payments-worker"}')
+    |> handle_connection()
+
+println("Req 1 (User API)  : Status #{test_req1.status} -> #{test_req1.resp_body}")
+println("Req 2 (Admin Eng) : Status #{test_req2.status} -> #{test_req2.resp_body}")
+println("Req 3 (Deployment): Status #{test_req3.status} -> #{test_req3.resp_body}")

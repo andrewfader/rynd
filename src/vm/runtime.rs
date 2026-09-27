@@ -82,10 +82,19 @@ pub fn globals() -> HashMap<String, Value> {
         ("Some", 1),
         ("Ok", 1),
         ("Err", 1),
+        ("merge", 2),
+        ("put", 3),
+        ("get", 3),
+        ("has_key", 2),
+        ("delete", 2),
+        ("apply", 2),
+        ("call_method", 3),
     ]
     .iter()
     .copied()
     .chain(super::scripting::BUILTINS.iter().copied())
+    .chain(super::sockets::BUILTINS.iter().copied())
+    .chain(super::concurrency::BUILTINS.iter().copied())
     {
         globals.insert(
             name.into(),
@@ -365,9 +374,32 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 vec![Value::string(error.to_string())],
             )),
         },
+        "apply" => {
+            let callee = match &args[0] {
+                Value::String(fn_name) => rt.get_global(fn_name)?,
+                other => other.clone(),
+            };
+            let call_args = list(&args[1])?;
+            rt.call_ref(&callee, call_args)
+        }
+        "call_method" => {
+            let Value::Map(obj) = &args[0] else {
+                return Err(error("call_method() expects map receiver"));
+            };
+            let method_name = string(&args[1])?;
+            let call_args = list(&args[2])?;
+            let method = obj
+                .get(method_name)
+                .ok_or_else(|| error(format!("Method '{method_name}' not found on object")))?;
+            let mut full_args = Vec::with_capacity(call_args.len() + 1);
+            full_args.push(args[0].clone());
+            full_args.extend_from_slice(call_args);
+            rt.call_ref(method, &full_args)
+        }
         "sort" | "sort_by" | "group_by" | "keys" | "values" | "entries" | "take" | "skip"
         | "any" | "all" | "find" | "filter_map" | "flat_map" | "enumerate" | "zip" | "zip_with"
-        | "chunks" | "windows" | "reverse" | "uniq" | "flatten" | "each" | "partition" | "scan" => {
+        | "chunks" | "windows" | "reverse" | "uniq" | "flatten" | "each" | "partition" | "scan"
+        | "merge" | "put" | "get" | "has_key" | "delete" => {
             super::collections::call(rt, name, args)
         }
         "lines" => Ok(Value::list(
@@ -519,7 +551,15 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 },
             )
         }
-        _ => super::scripting::call(rt, name, args),
+        _ => {
+            if super::sockets::BUILTINS.iter().any(|(b, _)| *b == name) {
+                super::sockets::call(rt, name, args)
+            } else if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
+                super::concurrency::call(rt, name, args)
+            } else {
+                super::scripting::call(rt, name, args)
+            }
+        }
     }
 }
 

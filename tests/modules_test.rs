@@ -98,6 +98,17 @@ fn module_errors_include_source_and_reject_cycles() {
             .to_string()
             .contains("Duplicate export")
     );
+    f.file("valid.rynd", "pub let val = 1");
+    let dup = f.file(
+        "dup.rynd",
+        "import \"valid.rynd\" as same; import \"valid.rynd\" as same",
+    );
+    assert!(
+        rynd::check_file(&dup)
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate import alias 'same'")
+    );
     f.file("a.rynd", "import \"missing.rynd\" as no");
     assert!(rynd::check_file(&a).is_err());
 }

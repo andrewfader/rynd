@@ -17,6 +17,12 @@ pub fn new(path: impl AsRef<Path>, library: bool) -> RyndResult<()> {
             "Project name must start with a letter and contain only letters, digits, '-' or '_'",
         ));
     }
+    let crate_name = name.replace('-', "_");
+    if matches!(crate_name.as_str(), "crate" | "self" | "super" | "Self") {
+        return Err(fail(
+            "Project name cannot be a reserved Rust keyword ('crate', 'self', 'super')",
+        ));
+    }
     if path.exists() {
         return Err(fail(
             "Project destination already exists; no files were changed",
@@ -77,15 +83,14 @@ pub fn greet(name) {
             "src/main.rs",
             &format!(
                 r#"fn main() {{
-    let result = {name}::Application::new(std::env::args().skip(1).collect())
+    let result = r#{crate_name}::Application::new(std::env::args().skip(1).collect())
         .and_then(|mut app| app.call("main", &[]));
     if let Err(error) = result {{
         eprintln!("{{error}}");
         std::process::exit(1);
     }}
 }}
-"#,
-                name = name.replace('-', "_")
+"#
             ),
         )?;
     }
@@ -223,5 +228,7 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/vm/scripting.rs", include_str!("vm/scripting.rs")),
     ("src/vm/json.rs", include_str!("vm/json.rs")),
     ("src/vm/collections.rs", include_str!("vm/collections.rs")),
+    ("src/vm/sockets.rs", include_str!("vm/sockets.rs")),
+    ("src/vm/concurrency.rs", include_str!("vm/concurrency.rs")),
     ("src/vm/value.rs", include_str!("vm/value.rs")),
 ];

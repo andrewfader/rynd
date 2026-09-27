@@ -127,8 +127,12 @@ impl Loader {
                 if !imports.insert(alias.clone()) {
                     return Err(failure(format!("Duplicate import alias '{alias}'"), span));
                 }
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
                 let imported = self
-                    .module(&path.parent().unwrap().join(relative), false)
+                    .module(&parent.join(relative), false)
                     .map_err(|e| e.at(span.clone()))?;
                 *statement = Stmt::Let {
                     pattern: Pattern::Variable(alias.clone()),

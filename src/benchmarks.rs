@@ -76,7 +76,9 @@ fn main() {
 "#,
     );
     let rs = scratch.0.join("pipeline.rs");
-    let bin = scratch.0.join("pipeline");
+    let bin = scratch
+        .0
+        .join(format!("pipeline{}", std::env::consts::EXE_SUFFIX));
     fs::write(&rs, source).map_err(|e| e.to_string())?;
     let start = std::time::Instant::now();
     let compile = Command::new("rustc")

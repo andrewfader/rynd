@@ -30,6 +30,91 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                 .collect(),
         ));
     }
+    match name {
+        "merge" => {
+            let Value::Map(m1) = &args[0] else {
+                return Err(error("merge() expects map as first argument"));
+            };
+            let Value::Map(m2) = &args[1] else {
+                return Err(error("merge() expects map as second argument"));
+            };
+            let mut out = (**m1).clone();
+            for (k, v) in m2.iter() {
+                out.insert(k.clone(), v.clone());
+            }
+            return Ok(Value::map(out));
+        }
+        "put" => {
+            let Value::Map(m) = &args[0] else {
+                return Err(error("put() expects map"));
+            };
+            let key = match &args[1] {
+                Value::String(s) => s.as_str(),
+                v => {
+                    return Err(error(format!(
+                        "Map key must be string, got {}",
+                        v.type_name()
+                    )));
+                }
+            };
+            let mut out = (**m).clone();
+            out.insert(key.into(), args[2].clone());
+            return Ok(Value::map(out));
+        }
+        "get" => {
+            let Value::Map(m) = &args[0] else {
+                return Err(error("get() expects map"));
+            };
+            let key = match &args[1] {
+                Value::String(s) => s.as_str(),
+                v => {
+                    return Err(error(format!(
+                        "Map key must be string, got {}",
+                        v.type_name()
+                    )));
+                }
+            };
+            let default = &args[2];
+            return Ok(m
+                .get(key)
+                .filter(|v| **v != Value::Nil)
+                .unwrap_or(default)
+                .clone());
+        }
+        "has_key" => {
+            let Value::Map(m) = &args[0] else {
+                return Err(error("has_key() expects map"));
+            };
+            let key = match &args[1] {
+                Value::String(s) => s.as_str(),
+                v => {
+                    return Err(error(format!(
+                        "Map key must be string, got {}",
+                        v.type_name()
+                    )));
+                }
+            };
+            return Ok(Value::Bool(m.contains_key(key)));
+        }
+        "delete" => {
+            let Value::Map(m) = &args[0] else {
+                return Err(error("delete() expects map"));
+            };
+            let key = match &args[1] {
+                Value::String(s) => s.as_str(),
+                v => {
+                    return Err(error(format!(
+                        "Map key must be string, got {}",
+                        v.type_name()
+                    )));
+                }
+            };
+            let mut out = (**m).clone();
+            out.remove(key);
+            return Ok(Value::map(out));
+        }
+        _ => {}
+    }
     let items = list(&args[0])?;
     if matches!(
         name,

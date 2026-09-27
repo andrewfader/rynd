@@ -84,7 +84,12 @@ impl RyndEngine {
                 "Compiled script belongs to another engine or an expired session",
             ));
         }
-        self.machine.run_from(script.entry)
+        let result = self.machine.run_from(script.entry);
+        if result.is_err() {
+            self.machine.stack.clear();
+            self.machine.frames.clear();
+        }
+        result
     }
 
     pub fn enable_output_capture(&mut self) {
@@ -175,7 +180,7 @@ impl Default for RyndEngine {
 pub fn check(source: &str) -> RyndResult<()> {
     let tokens = Lexer::new(source).tokenize()?;
     let program = Parser::new(tokens).parse()?;
-    Compiler::with_offset(0).compile(&program)?;
+    Compiler::new().compile(&program)?;
     Ok(())
 }
 

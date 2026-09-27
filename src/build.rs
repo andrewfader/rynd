@@ -32,7 +32,9 @@ pub fn native(rust: &str, output: impl AsRef<Path>) -> RyndResult<()> {
     let scratch = Scratch(parent.join(format!(".rynd-build-{}-{unique}", std::process::id())));
     fs::create_dir(&scratch.0).map_err(io)?;
     let source = scratch.0.join("program.rs");
-    let binary = scratch.0.join("program");
+    let binary = scratch
+        .0
+        .join(format!("program{}", std::env::consts::EXE_SUFFIX));
     fs::write(&source, rust).map_err(io)?;
     let result = Command::new("rustc")
         .args(["--edition=2024", "--crate-name", "rynd_program", "-O"])
@@ -47,7 +49,14 @@ pub fn native(rust: &str, output: impl AsRef<Path>) -> RyndResult<()> {
             String::from_utf8_lossy(&result.stderr)
         )));
     }
-    fs::rename(&binary, output).map_err(io)
+    if let Err(err) = fs::rename(&binary, output) {
+        if fs::copy(&binary, output).is_ok() {
+            let _ = fs::remove_file(&binary);
+            return Ok(());
+        }
+        return Err(io(err));
+    }
+    Ok(())
 }
 
 /// Reject aliases of the source file before writing generated output.
@@ -59,10 +68,34 @@ pub fn distinct_output(input: &Path, output: &Path) -> RyndResult<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let a = fs::metadata(a).map_err(io)?;
-            let b = fs::metadata(b).map_err(io)?;
+            let a = fs::metadata(&a).map_err(io)?;
+            let b = fs::metadata(&b).map_err(io)?;
             if a.dev() == b.dev() && a.ino() == b.ino() {
                 return Err(io("Output is a hard link to the input source"));
+            }
+        }
+    } else if let Ok(a) = input.canonicalize() {
+        let parent = output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if let Ok(b_parent) = parent.canonicalize()
+            && let (Some(a_name), Some(b_name)) = (a.file_name(), output.file_name())
+            && a_name == b_name
+            && a.parent() == Some(b_parent.as_path())
+        {
+            return Err(io("Output must not overwrite the input source"));
+        }
+        if let Ok(target) = fs::read_link(output) {
+            let resolved = if target.is_relative() {
+                parent.join(target)
+            } else {
+                target
+            };
+            if let Ok(resolved_canon) = resolved.canonicalize()
+                && a == resolved_canon
+            {
+                return Err(io("Output must not overwrite the input source"));
             }
         }
     }
