@@ -105,14 +105,13 @@ under `[dependencies]` in Cargo.toml to use the Rust ecosystem there.
 - `cargo run --offline -- Ada`: run a binary project.
 - `Application::new(args)?.call("greet", &[Value::string("Ada")])`: call from Rust.
 
-The generated code uses the shared `rynd::Value` ABI. It executes native Rust,
-not the parser or bytecode VM. It still uses Rynd's dynamic value representation.
+The generated code executes native Rust with the shared dynamic `rynd::Value`
+ABI. Use `Value::from` and checked `TryFrom` conversions in Rust adapters.
 
 `.rynd/compiler` is a pinned, vendored snapshot of the Rynd compiler/runtime,
 so this project builds offline and remains portable after moving it. Check it
-into source control. The snapshot has no third-party dependencies. Cargo's lock
-file pins any dependencies you add. Update the snapshot deliberately when
-upgrading Rynd; editing an installed CLI does not silently change this project.
+into source control. The snapshot uses Rust's standard library. Cargo's lockfile pins dependencies
+you add. Update the snapshot deliberately when upgrading Rynd.
 "#,
     )?;
     write(
@@ -199,11 +198,13 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/benchmark_stats.rs", include_str!("benchmark_stats.rs")),
     ("src/benchmarks.rs", include_str!("benchmarks.rs")),
     ("src/build.rs", include_str!("build.rs")),
+    ("src/debugger.rs", include_str!("debugger.rs")),
     ("src/error.rs", include_str!("error.rs")),
     ("src/lib.rs", include_str!("lib.rs")),
     ("src/main.rs", include_str!("main.rs")),
     ("src/modules.rs", include_str!("modules.rs")),
     ("src/project.rs", include_str!("project.rs")),
+    ("src/syntax/captures.rs", include_str!("syntax/captures.rs")),
     ("src/syntax/ast.rs", include_str!("syntax/ast.rs")),
     ("src/syntax/lexer.rs", include_str!("syntax/lexer.rs")),
     ("src/syntax/mod.rs", include_str!("syntax/mod.rs")),
@@ -219,6 +220,7 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/vm/mod.rs", include_str!("vm/mod.rs")),
     ("src/vm/opcode.rs", include_str!("vm/opcode.rs")),
     ("src/vm/runtime.rs", include_str!("vm/runtime.rs")),
+    ("src/vm/scripting.rs", include_str!("vm/scripting.rs")),
     ("src/vm/json.rs", include_str!("vm/json.rs")),
     ("src/vm/collections.rs", include_str!("vm/collections.rs")),
     ("src/vm/value.rs", include_str!("vm/value.rs")),

@@ -5,4 +5,5 @@ pub mod json;
 pub mod machine;
 pub mod opcode;
 pub mod runtime;
+pub mod scripting;
 pub mod value;

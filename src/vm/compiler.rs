@@ -1,4 +1,4 @@
-use super::opcode::{Chunk, OpCode};
+use super::opcode::{Chunk, DebugSymbols, OpCode};
 use super::runtime::{literal, pattern_names};
 use super::value::Value;
 use crate::error::{RyndError, RyndResult, Span};
@@ -20,6 +20,8 @@ pub struct Compiler {
     scope_depth: usize,
     self_name: Option<String>,
     span: Span,
+    debug: bool,
+    debug_symbols: Vec<DebugSymbols>,
 }
 
 impl Default for Compiler {
@@ -41,9 +43,24 @@ impl Compiler {
             scope_depth: 0,
             self_name: None,
             span: Span::new(1, 1),
+            debug: false,
+            debug_symbols: Vec::new(),
         }
     }
+    pub fn compile_debug(
+        mut self,
+        program: &Program,
+    ) -> RyndResult<(Vec<Chunk>, Vec<DebugSymbols>)> {
+        self.debug = true;
+        self.debug_symbols.push(DebugSymbols::default());
+        self.compile_program(program)?;
+        Ok((self.chunks, self.debug_symbols))
+    }
     pub fn compile(mut self, program: &Program) -> RyndResult<Vec<Chunk>> {
+        self.compile_program(program)?;
+        Ok(self.chunks)
+    }
+    fn compile_program(&mut self, program: &Program) -> RyndResult<()> {
         for (i, stmt) in program.statements.iter().enumerate() {
             self.statement(stmt, i + 1 == program.statements.len())?;
         }
@@ -51,12 +68,16 @@ impl Compiler {
             self.emit(OpCode::Nil);
         }
         self.emit(OpCode::Halt);
-        Ok(self.chunks)
+        Ok(())
     }
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.chunks[self.current_chunk]
     }
     fn emit(&mut self, op: OpCode) -> usize {
+        if self.debug {
+            let names = self.locals.iter().map(|local| local.name.clone()).collect();
+            self.debug_symbols[self.current_chunk].locals.push(names);
+        }
         let span = self.span.clone();
         self.chunk().spans.push(span.clone());
         self.chunk().write_op(op, span.line)
@@ -202,6 +223,8 @@ impl Compiler {
         names.extend(self.locals.iter().map(|v| v.name.clone()));
         names.sort();
         names.dedup();
+        let needed = crate::syntax::captures::free_names(name, params, body);
+        names.retain(|name| needed.contains(name));
         let captures: Vec<_> = names.iter().map(|name| self.lookup(name)).collect();
         let old_chunk = self.current_chunk;
         let old_locals = std::mem::take(&mut self.locals);
@@ -211,6 +234,12 @@ impl Compiler {
         let old_span = self.span.clone();
         self.chunks.push(Chunk::new());
         self.current_chunk = self.chunks.len() - 1;
+        if self.debug {
+            self.debug_symbols.push(DebugSymbols {
+                locals: Vec::new(),
+                captures: self.upvalues.clone(),
+            });
+        }
         let chunk_index = self.current_chunk + self.base;
         self.scope_depth = 1;
         self.self_name = Some(name.into());

@@ -22,6 +22,8 @@ pub struct Machine {
     pub globals: HashMap<String, Value>,
     pub output_buffer: Option<Vec<String>>,
     local_pool: Vec<Vec<Value>>,
+    pub debugger: Option<Box<dyn crate::debugger::DebugHook>>,
+    pub debug_symbols: Vec<super::opcode::DebugSymbols>,
 }
 impl Machine {
     pub fn new(chunks: Vec<Chunk>) -> Self {
@@ -32,6 +34,8 @@ impl Machine {
             globals: runtime::globals(),
             output_buffer: None,
             local_pool: Vec::new(),
+            debugger: None,
+            debug_symbols: Vec::new(),
         }
     }
     pub fn enable_output_capture(&mut self) {
@@ -73,6 +77,9 @@ impl Machine {
         result
     }
     pub fn run_until_depth(&mut self, depth: usize) -> RyndResult<Value> {
+        if self.debugger.is_some() {
+            return self.run_debug_until_depth(depth);
+        }
         while self.frames.len() > depth {
             let frame = self.frames.last_mut().unwrap();
             let chunk = self
@@ -99,6 +106,50 @@ impl Machine {
         }
         self.pop()
     }
+    #[cold]
+    fn run_debug_until_depth(&mut self, depth: usize) -> RyndResult<Value> {
+        while self.frames.len() > depth {
+            if let Some(mut debugger) = self.debugger.take() {
+                let result = debugger.before_instruction(self);
+                self.debugger = Some(debugger);
+                result?;
+            }
+            let frame = self.frames.last_mut().unwrap();
+            let chunk = self
+                .chunks
+                .get(frame.chunk_index)
+                .ok_or_else(|| error("Invalid function chunk"))?;
+            let op = chunk
+                .code
+                .get(frame.ip)
+                .cloned()
+                .ok_or_else(|| error("Instruction pointer out of bounds"))?;
+            let index = frame.chunk_index;
+            let ip = frame.ip;
+            frame.ip += 1;
+            if let Err(error) = self.step(op) {
+                let chunk = &self.chunks[index];
+                let span = chunk
+                    .spans
+                    .get(ip)
+                    .cloned()
+                    .unwrap_or_else(|| Span::new(*chunk.lines.get(ip).unwrap_or(&1), 1));
+                let error = error.at(span);
+                if let Some(mut debugger) = self.debugger.take() {
+                    if let Some(frame) = self.frames.last_mut() {
+                        frame.ip = ip;
+                    }
+                    let inspected = debugger.on_error(self, &error);
+                    self.debugger = Some(debugger);
+                    inspected?;
+                }
+                return Err(error);
+            }
+        }
+        self.pop()
+    }
+    // Debug and ordinary loops share semantics while keeping hot dispatch inlined.
+    #[inline(always)]
     fn step(&mut self, op: OpCode) -> RyndResult<()> {
         match op {
             OpCode::Constant(i) => {
@@ -263,6 +314,7 @@ impl Machine {
         }
         Ok(())
     }
+    #[inline(always)]
     fn push_frame(&mut self, callee: Value, args: Vec<Value>) -> RyndResult<()> {
         let entry_frame = usize::from(
             self.frames

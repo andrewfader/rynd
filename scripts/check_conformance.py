@@ -1,9 +1,4 @@
-"""Audit VM/native behavior; exit nonzero on failed expectations.
-
-Run from any directory with Python 3, Cargo, and rustc installed. Evidence and
-generated programs go in target/claim-audit; no language implementation is edited.
-These targeted probes are not a comprehensive language conformance suite.
-"""
+"""Check VM/native examples, REPL recovery, embedding, and benchmark failures."""
 
 import json
 import os
@@ -14,7 +9,7 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUT = ROOT / "target/claim-audit"
+OUT = ROOT / "target/conformance"
 BIN = ROOT / "target/debug/rynd"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -138,7 +133,7 @@ bench_bin = next(a["executable"] for a in artifacts
 benchmark_failures = []
 with tempfile.TemporaryDirectory(prefix="failing-toolchain-", dir=OUT) as directory:
     fake_rustc = pathlib.Path(directory) / "rustc"
-    fake_rustc.write_text('#!/bin/sh\nprintf "Simulated rustc failure for claim audit\\n" >&2\nexit 1\n')
+    fake_rustc.write_text('#!/bin/sh\nprintf "Simulated rustc failure for conformance check\\n" >&2\nexit 1\n')
     fake_rustc.chmod(0o755)
     environment = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
     for name, command, banner in [
@@ -146,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix="failing-toolchain-", dir=OUT) as direct
         ("cli_bench_failure", [BIN, "bench"], "Benchmark suite passed successfully."),
     ]:
         result = run(command, env=environment, timeout=60)
-        injected = "Simulated rustc failure for claim audit" in result["stderr"]
+        injected = "Simulated rustc failure for conformance check" in result["stderr"]
         ok = injected and isinstance(result["status"], int) and result["status"] != 0 and banner not in result["stdout"]
         benchmark_failures.append(dict(name=name, result=result, ok=ok))
         print(f"{name}: {'PASS' if ok else 'FAIL'}", flush=True)

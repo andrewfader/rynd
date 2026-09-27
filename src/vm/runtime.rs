@@ -44,6 +44,15 @@ pub fn globals() -> HashMap<String, Value> {
         ("flat_map", 2),
         ("enumerate", 1),
         ("zip", 2),
+        ("zip_with", 3),
+        ("chunks", 2),
+        ("windows", 2),
+        ("reverse", 1),
+        ("uniq", 1),
+        ("flatten", 1),
+        ("each", 2),
+        ("partition", 2),
+        ("scan", 3),
         ("map", 2),
         ("filter", 2),
         ("reduce", 3),
@@ -73,7 +82,11 @@ pub fn globals() -> HashMap<String, Value> {
         ("Some", 1),
         ("Ok", 1),
         ("Err", 1),
-    ] {
+    ]
+    .iter()
+    .copied()
+    .chain(super::scripting::BUILTINS.iter().copied())
+    {
         globals.insert(
             name.into(),
             Value::Builtin {
@@ -353,7 +366,8 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
             )),
         },
         "sort" | "sort_by" | "group_by" | "keys" | "values" | "entries" | "take" | "skip"
-        | "any" | "all" | "find" | "filter_map" | "flat_map" | "enumerate" | "zip" => {
+        | "any" | "all" | "find" | "filter_map" | "flat_map" | "enumerate" | "zip" | "zip_with"
+        | "chunks" | "windows" | "reverse" | "uniq" | "flatten" | "each" | "partition" | "scan" => {
             super::collections::call(rt, name, args)
         }
         "lines" => Ok(Value::list(
@@ -505,7 +519,7 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 },
             )
         }
-        _ => Err(error(format!("Unknown builtin '{name}'"))),
+        _ => super::scripting::call(rt, name, args),
     }
 }
 

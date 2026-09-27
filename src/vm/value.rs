@@ -1,5 +1,6 @@
 use crate::error::RyndResult;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::fmt;
 use std::rc::Rc;
 
@@ -240,6 +241,92 @@ impl fmt::Display for Value {
             Value::Native { name, arity, .. } => {
                 write!(f, "<native fn {name}/{arity}>")
             }
+        }
+    }
+}
+
+// Exact scalar conversions keep adapter validation explicit and lossless.
+macro_rules! scalar_conversion {
+    ($rust:ty, $variant:ident, $expected:literal) => {
+        impl From<$rust> for Value {
+            fn from(value: $rust) -> Self {
+                Self::$variant(value)
+            }
+        }
+        impl TryFrom<&Value> for $rust {
+            type Error = crate::error::RyndError;
+            fn try_from(value: &Value) -> Result<Self, Self::Error> {
+                match value {
+                    Value::$variant(inner) => Ok(*inner),
+                    _ => Err(super::runtime::error(format!(
+                        "Expected {}, got {}",
+                        $expected,
+                        value.type_name()
+                    ))),
+                }
+            }
+        }
+        impl TryFrom<Value> for $rust {
+            type Error = crate::error::RyndError;
+            fn try_from(value: Value) -> Result<Self, Self::Error> {
+                Self::try_from(&value)
+            }
+        }
+    };
+}
+scalar_conversion!(i64, Int, "int");
+scalar_conversion!(f64, Float, "float");
+scalar_conversion!(bool, Bool, "bool");
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::string(value)
+    }
+}
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::string(value)
+    }
+}
+impl<T: Into<Value>> From<Vec<T>> for Value {
+    fn from(values: Vec<T>) -> Self {
+        Self::list(values.into_iter().map(Into::into).collect())
+    }
+}
+impl<T: Into<Value>> From<BTreeMap<String, T>> for Value {
+    fn from(values: BTreeMap<String, T>) -> Self {
+        Self::map(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, value.into()))
+                .collect(),
+        )
+    }
+}
+impl<'a> TryFrom<&'a Value> for &'a str {
+    type Error = crate::error::RyndError;
+    fn try_from(value: &'a Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::String(inner) => Ok(inner.as_str()),
+            _ => Err(super::runtime::error(format!(
+                "Expected string, got {}",
+                value.type_name()
+            ))),
+        }
+    }
+}
+impl TryFrom<&Value> for String {
+    type Error = crate::error::RyndError;
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        <&str>::try_from(value).map(str::to_owned)
+    }
+}
+impl TryFrom<Value> for String {
+    type Error = crate::error::RyndError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::String(inner) => Ok(Rc::unwrap_or_clone(inner)),
+            other => Self::try_from(&other),
         }
     }
 }

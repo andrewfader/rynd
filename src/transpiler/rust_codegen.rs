@@ -36,6 +36,8 @@ impl RustTranspiler {
         out.push_str(include_str!("../vm/runtime.rs"));
         out.push_str("\n} pub mod json {\n");
         out.push_str(include_str!("../vm/json.rs"));
+        out.push_str("\n} pub mod scripting {\n");
+        out.push_str(include_str!("../vm/scripting.rs"));
         out.push_str("\n} pub mod collections {\n");
         out.push_str(include_str!("../vm/collections.rs"));
         out.push_str("\n}}\n");
@@ -144,7 +146,11 @@ impl RustTranspiler {
         let old_bindings = std::mem::take(&mut self.bindings);
         let old_depth = self.depth;
         let mut captures = String::new();
-        for (name, rust) in &old_bindings {
+        let mut needed = crate::syntax::captures::free_names(name, params, body);
+        for (name, rust) in old_bindings.iter().rev() {
+            if !needed.remove(name) {
+                continue;
+            }
             let capture = self.fresh();
             captures.push_str(&format!("let {capture} = {rust}.clone();\n"));
             self.bindings.push((name.clone(), capture));

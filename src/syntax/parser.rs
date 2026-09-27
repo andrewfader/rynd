@@ -110,8 +110,42 @@ impl Parser {
         } else if self.check(&TokenType::Return) {
             self.parse_return_statement()
         } else {
-            let expr = self.parse_expression(Precedence::Lowest)?;
+            let expr = self.parse_statement_expression()?;
             Ok(Stmt::Expression(expr))
+        }
+    }
+
+    fn parse_statement_expression(&mut self) -> RyndResult<Expr> {
+        let body = self.parse_expression(Precedence::Lowest)?;
+        self.apply_statement_modifier(body)
+    }
+
+    fn apply_statement_modifier(&mut self, body: Expr) -> RyndResult<Expr> {
+        // Keep comprehension filters and match guards in their own grammar.
+        if self.peek().span.line == self.tokens[self.cursor - 1].span.line
+            && matches!(self.peek().token_type, TokenType::If | TokenType::Unless)
+        {
+            let modifier = self.advance();
+            let mut condition = self.parse_expression(Precedence::Lowest)?;
+            if modifier.token_type == TokenType::Unless {
+                condition = Expr::new(
+                    ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(condition),
+                    },
+                    modifier.span.clone(),
+                );
+            }
+            Ok(Expr::new(
+                ExprKind::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(body),
+                    else_branch: None,
+                },
+                modifier.span,
+            ))
+        } else {
+            Ok(body)
         }
     }
 
@@ -138,21 +172,11 @@ impl Parser {
         };
 
         self.consume(TokenType::LParen, "Expected '(' after function name")?;
-        let mut params = Vec::new();
-        if !self.check(&TokenType::RParen) {
-            loop {
-                let param_tok = self.consume_identifier("Expected parameter name")?;
-                if let TokenType::Identifier(p) = param_tok.token_type {
-                    params.push(p);
-                }
-                if !self.match_token(&[TokenType::Comma]) {
-                    break;
-                }
-            }
-        }
+        let (params, bindings) = self.parse_parameters(&TokenType::RParen)?;
         self.consume(TokenType::RParen, "Expected ')' after parameters")?;
 
         let body = self.parse_block_expression()?;
+        let body = Self::bind_parameters(body, bindings);
         Ok(Stmt::Function {
             name,
             params,
@@ -171,10 +195,25 @@ impl Parser {
         } else {
             Some(self.parse_expression(Precedence::Lowest)?)
         };
-        Ok(Stmt::Return {
+        let span = ret_token.span;
+        let statement = Stmt::Return {
             value,
-            span: ret_token.span,
-        })
+            span: span.clone(),
+        };
+        if self.peek().span.line == self.tokens[self.cursor - 1].span.line
+            && matches!(self.peek().token_type, TokenType::If | TokenType::Unless)
+        {
+            let body = Expr::new(
+                ExprKind::Block {
+                    statements: vec![statement],
+                    final_expr: None,
+                },
+                span,
+            );
+            Ok(Stmt::Expression(self.apply_statement_modifier(body)?))
+        } else {
+            Ok(statement)
+        }
     }
 
     fn parse_pattern(&mut self) -> RyndResult<Pattern> {
@@ -342,6 +381,10 @@ impl Parser {
             TokenType::Nil => {
                 self.advance();
                 Ok(Expr::new(ExprKind::Literal(Literal::Nil), span))
+            }
+            TokenType::Underscore => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Identifier("_".into()), span))
             }
             TokenType::Identifier(name) => {
                 self.advance();
@@ -530,7 +573,7 @@ impl Parser {
         // Lookahead to distinguish between Map literal { k: v } and Block { stmts }
         // If the next tokens match `expr : expr`, it's a Map!
         // We can parse an expression first, then check if ':' follows
-        let first_expr = self.parse_expression(Precedence::Lowest)?;
+        let first_expr = self.parse_statement_expression()?;
         if self.match_token(&[TokenType::Colon]) {
             let first_val = self.parse_expression(Precedence::Lowest)?;
             if self.match_token(&[TokenType::For]) {
@@ -624,7 +667,7 @@ impl Parser {
             {
                 statements.push(self.parse_statement()?);
             } else {
-                let expr = self.parse_expression(Precedence::Lowest)?;
+                let expr = self.parse_statement_expression()?;
                 if self.match_token(&[TokenType::Semicolon]) {
                     statements.push(Stmt::Expression(expr));
                 } else if self.check(&TokenType::RBrace) {
@@ -659,7 +702,7 @@ impl Parser {
             {
                 statements.push(self.parse_statement()?);
             } else {
-                let expr = self.parse_expression(Precedence::Lowest)?;
+                let expr = self.parse_statement_expression()?;
                 if self.match_token(&[TokenType::Semicolon]) {
                     statements.push(Stmt::Expression(expr));
                 } else if self.check(&TokenType::RBrace) {
@@ -681,29 +724,65 @@ impl Parser {
         ))
     }
 
+    fn parse_parameters(&mut self, end: &TokenType) -> RyndResult<(Vec<String>, Vec<Stmt>)> {
+        let mut params = Vec::new();
+        let mut bindings = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        while !self.check(end) && !self.is_at_end() {
+            let span = self.peek().span.clone();
+            let pattern = self.parse_pattern()?;
+            for name in crate::vm::runtime::pattern_names(&pattern) {
+                if !names.insert(name) {
+                    return Err(RyndError::ParseError {
+                        message: "Duplicate function parameter".into(),
+                        span,
+                    });
+                }
+            }
+            if let Pattern::Variable(name) = pattern {
+                params.push(name);
+            } else {
+                let name = format!("@argument{}", params.len());
+                params.push(name.clone());
+                bindings.push(Stmt::Let {
+                    pattern,
+                    init: Expr::new(ExprKind::Identifier(name), span.clone()),
+                    is_mut: false,
+                    span,
+                });
+            }
+            if !self.match_token(&[TokenType::Comma]) {
+                break;
+            }
+        }
+        Ok((params, bindings))
+    }
+    fn bind_parameters(body: Expr, bindings: Vec<Stmt>) -> Expr {
+        if bindings.is_empty() {
+            body
+        } else {
+            let span = body.span.clone();
+            Expr::new(
+                ExprKind::Block {
+                    statements: bindings,
+                    final_expr: Some(Box::new(body)),
+                },
+                span,
+            )
+        }
+    }
+
     fn parse_lambda_expression(&mut self) -> RyndResult<Expr> {
         let start_tok = self.advance(); // consume '\' or '|'
         let span = start_tok.span;
         let is_rust_style = start_tok.token_type == TokenType::Pipe;
 
-        let mut params = Vec::new();
         let end_token = if is_rust_style {
             TokenType::Pipe
         } else {
             TokenType::Arrow
         };
-
-        if !self.check(&end_token) {
-            loop {
-                let p_tok = self.consume_identifier("Expected parameter name in lambda")?;
-                if let TokenType::Identifier(p) = p_tok.token_type {
-                    params.push(p);
-                }
-                if !self.match_token(&[TokenType::Comma]) {
-                    break;
-                }
-            }
-        }
+        let (params, bindings) = self.parse_parameters(&end_token)?;
 
         if is_rust_style {
             self.consume(
@@ -715,6 +794,7 @@ impl Parser {
         }
 
         let body = self.parse_expression(Precedence::Lowest)?;
+        let body = Self::bind_parameters(body, bindings);
         Ok(Expr::new(
             ExprKind::Lambda {
                 params,

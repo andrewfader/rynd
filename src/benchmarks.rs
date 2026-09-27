@@ -156,6 +156,21 @@ fn main() {
             Value::Int(50010000),
         ),
         (
+            "chunks(100) + batch sums",
+            r"items |> chunks(100) |> map(sum) |> sum()",
+            Value::Int(50005000),
+        ),
+        (
+            "zip + destructured map",
+            r"zip(items, items) |> map(\(a, b) -> a + b) |> sum()",
+            Value::Int(100010000),
+        ),
+        (
+            "zip_with + sum",
+            r"zip_with(items, items, \a, b -> a + b) |> sum()",
+            Value::Int(100010000),
+        ),
+        (
             "filter_map + sum",
             r"items |> filter_map(\x -> x % 2 == 0 ? Some(x * 2) : None) |> sum()",
             Value::Int(50010000),

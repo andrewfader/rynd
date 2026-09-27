@@ -84,3 +84,35 @@ fn integer_errors_are_results_not_panics() {
         assert!(RyndEngine::new().eval(code).is_err(), "{code}");
     }
 }
+
+#[test]
+fn closures_release_unused_host_values_and_keep_transitive_values() {
+    use rynd::{RyndEngine, Value};
+    use std::rc::Rc;
+    let retained = Rc::new(vec![Value::Int(42)]);
+    let unused = Rc::new(vec![Value::Int(99)]);
+    let mut engine = RyndEngine::new();
+    engine
+        .eval(r"fn factory(used, unused) { \ -> \ -> used[0] }")
+        .unwrap();
+    let closure = engine
+        .call(
+            "factory",
+            &[Value::List(retained.clone()), Value::List(unused.clone())],
+        )
+        .unwrap();
+    assert_eq!(
+        Rc::strong_count(&unused),
+        1,
+        "unused argument must be released"
+    );
+    assert_eq!(
+        Rc::strong_count(&retained),
+        2,
+        "transitive reference must survive"
+    );
+    engine.set_global("closure", closure);
+    assert_eq!(engine.eval("closure()()").unwrap(), Value::Int(42));
+    engine.reset();
+    assert_eq!(Rc::strong_count(&retained), 1);
+}

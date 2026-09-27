@@ -788,3 +788,86 @@ fn recoverable_errors_native_contract() {
 fn json_errors_retain_source_locations_on_both_targets() {
     verify("json_error", "parse_json(\"[1,]\")", Some(""), true);
 }
+
+#[test]
+fn selective_captures_preserve_lexical_scopes() {
+    verify(
+        "selective_captures",
+        r#"
+        fn factory(x, unused) {
+            let before = \ -> { let x = x + 1; x }
+            let nested = \ -> \y -> x + y
+            let shadow = \x -> x * 2
+            let pattern = \v -> match v { Some(x) if x > 0 => x, _ => x }
+            let comp = \ -> {x: x * 2 for x in [1, 2] if x > 0}
+            let x = x + 10
+            fn recursive(n) { n == 0 ? x : recursive(n - 1) }
+            let indirect = \ -> recursive(2)
+            [before(), nested()(3), shadow(4), pattern(None), pattern(Some(9)), comp(), indirect()]
+        }
+        fn lowered_capture() {
+            let map = \xs, f -> [f(7)]
+            let make = \ -> [x + 1 for x in [1, 2]]
+            make()
+        }
+        [factory(5, [100, 200]), lowered_capture()]
+        "#,
+        Some("[[6, 8, 8, 5, 9, {\"1\": 2, \"2\": 4}, 15], [8]]\n"),
+        false,
+    );
+}
+
+#[test]
+fn scripting_sugar_and_collection_tools_native_parity() {
+    verify(
+        "scripting_tools",
+        r#"
+        fn safe(x) {
+            return 9 unless x > 0
+            x * 2
+        }
+        println('literal #{1 / 0} \n') if not false and true
+        println('skipped') unless true
+        let condition = { 7 if true }
+        let xs = [1, 2, 3, 4, 5]
+        let (yes, no) = partition(xs, \x -> x % 2 == 0)
+        let zipped = zip_with([1, 2, 3], [10, 20], \a, b -> a + b)
+        let scanned = scan(xs, 0, \sum, x -> sum + x)
+        let filtered = "warn: one\nok\nwarn: two\n" |> grep('warn:')
+        let changed = filtered |> map(\line -> replace(line, 'warn:', 'notice:'))
+        let data = "{\"a\":1}\n\n{\"a\":2}\n" |> parse_json_lines()
+        assert(len(data) == 2, 'two records')
+        [safe(0), safe(3), condition, chunks(xs, 2), windows(xs, 3),
+         reverse(uniq([1, 2, 1, 3, 2])), flatten([[1], [], [2, 3]]), yes, no,
+         zipped, scanned, changed, words(' a  b\nc '), upper('hé'), lower('ABC'),
+         starts_with('abc', 'ab'), ends_with('abc', 'bc'), type_of(data),
+         parse_json_lines(to_json_lines(data)) == data, benchmark(\ -> 42, 2).result]
+    "#,
+        Some(
+            "literal #{1 / 0} \\n\n[9, 6, 7, [[1, 2], [3, 4], [5]], [[1, 2, 3], [2, 3, 4], [3, 4, 5]], [3, 2, 1], [1, 2, 3], [2, 4], [1, 3, 5], [11, 22], [1, 3, 6, 10, 15], [notice: one, notice: two], [a, b\\nc], HÉ, abc, true, true, list, true, 42]\n",
+        ),
+        false,
+    );
+}
+
+#[test]
+fn destructured_function_and_lambda_parameters() {
+    verify(
+        "destructured_params",
+        r#"
+        fn add((a, b), [c, d], Some(e)) { a + b + c + d + e }
+        let total = zip([1, 2], [10, 20]) |> map(\(x, y) -> x + y) |> sum()
+        let captured = { let offset = 5; \(a, [b]) -> \ -> offset + a + b }
+        let wildcard = \_, x -> x
+        [add((1, 2), [3, 4], Some(5)), total, captured((2, [3]))(), wildcard(99, 7)]
+    "#,
+        Some("[15, 33, 10, 7]\n"),
+        false,
+    );
+    verify(
+        "destructured_params_error",
+        "fn f([x, y]) { x + y } f([1])",
+        Some(""),
+        true,
+    );
+}

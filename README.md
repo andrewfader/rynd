@@ -40,6 +40,18 @@ Sort, group, search, and transform collections. Recover with `attempt` and
 
 The toolchain uses Rust's standard library. The dependency tree is a stump.
 
+## Work with records
+
+```sh
+rynd lines "upper(line) if contains(line, 'warn')" app.log
+rynd lines 'parse_json(line).name' people.jsonl
+rynd debug examples/debug_rules.rynd
+```
+
+Pair lists with `zip`, destructure callback parameters, batch with `chunks`,
+transform text, and invoke programs with `run_process`. The REPL and debugger
+include introspection, history, and expression benchmarks.
+
 ## Ship it
 
 ```sh
@@ -79,13 +91,15 @@ Register Rust callbacks, call script functions, or compile once and run repeated
 Use one engine per thread for trusted scripts. See the
 [embedded rules example](examples/embedded_rules.rs) for host state and callbacks.
 
-## Read the fine print
+## Documentation
 
 - [Language](LANGUAGE.md) — syntax, semantics, and Rust interop.
+- [Scripting](SCRIPTING.md) — streaming lines, batches, text, files, and processes.
+- [Interactive development](DEBUGGING.md) — REPL, debugger, and expression benchmarks.
 - [Examples](examples/) — pipelines, modules, reports, and embedding.
 - [Benchmarks](BENCHMARKS.md) — timings with the methodology attached.
-- [Requirements](REQUIREMENTS.md) · [Claim audit](CLAIM_AUDIT.md) — receipts.
-- [Codebase review](REVIEW.md) — research, shipped improvements, and next priorities.
+- [Requirements](REQUIREMENTS.md) — supported workflows and verification.
+- [Codebase review](REVIEW.md) — implementation decisions and development priorities.
 
 ```sh
 cargo test --offline

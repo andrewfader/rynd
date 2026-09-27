@@ -201,6 +201,26 @@ impl<'a> Lexer<'a> {
                         tokens.push(Token::new(TokenType::Dot, span));
                     }
                 }
+                '\'' => {
+                    self.advance();
+                    let mut value = String::new();
+                    while !self.is_at_end() && self.peek() != '\'' {
+                        let ch = self.advance();
+                        if ch == '\\' && matches!(self.peek(), '\\' | '\'') {
+                            value.push(self.advance());
+                        } else {
+                            value.push(ch);
+                        }
+                    }
+                    if self.is_at_end() {
+                        return Err(RyndError::LexError {
+                            message: "Unterminated string literal".into(),
+                            span,
+                        });
+                    }
+                    self.advance();
+                    tokens.push(Token::new(TokenType::StringLit(value), span));
+                }
                 '"' => {
                     let str_tok = self.lex_string(span)?;
                     tokens.push(str_tok);
@@ -385,6 +405,9 @@ impl<'a> Lexer<'a> {
             "import" => TokenType::Import,
             "as" => TokenType::As,
             "unless" => TokenType::Unless,
+            "and" => TokenType::AndAnd,
+            "or" => TokenType::OrOr,
+            "not" => TokenType::Bang,
             "let" => TokenType::Let,
             "mut" => TokenType::Mut,
             "if" => TokenType::If,

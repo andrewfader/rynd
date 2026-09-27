@@ -1,0 +1,10 @@
+# Run: rynd debug examples/debug_rules.rynd
+# At the first stop: break 5; continue; locals; p cents; next; finish; continue
+fn discount(cents) {
+    let rate = cents >= 1000 ? 10 : 0
+    let saved = cents * rate / 100
+    cents - saved
+}
+let prices = [500, 1500, 2500]
+let totals = prices |> map(discount)
+println(totals)

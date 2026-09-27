@@ -1,5 +1,45 @@
 # Measured performance
 
+## Scripting and debugger toolkit — 2026-09-26
+
+Release measurements use the same host and 3 warmup / 20 sampled-batch method
+described below. The starting revision was rebuilt separately and measured
+before this checkout. Correctness and coverage jobs were idle during timing.
+Both suites verified every workload result.
+
+| Workload | Starting revision mean (µs) | Toolkit mean (µs) |
+| --- | ---: | ---: |
+| VM `fib(18)`, precompiled | 1360.330 | 1561.466 |
+| VM pipeline, precompiled | 1806.193 | 1888.846 |
+| Native pipeline, excluding startup | 692.321 | 697.544 |
+| VM filter/map/sum, reused input | 1591.048 | 1717.014 |
+| VM filter-map/sum, reused input | 2050.236 | 2298.543 |
+
+The measured VM Fibonacci and pipeline workloads are approximately 15% and 5%
+slower, respectively. Native execution stays close to baseline. Normal execution
+uses a loop without debugger hooks; debug symbols are stored separately from
+ordinary bytecode. Explicit dispatch inlining reduced the larger slowdown seen
+during development. Further VM profiling remains useful.
+
+New workloads reuse the same 10,000-item input and compiled script:
+
+| Workload | Mean (µs) | Median (µs) | 95% interval (µs) |
+| --- | ---: | ---: | --- |
+| `chunks(100)` then batch sums | 162.150 | 160.315 | 160.563–163.737 |
+| `zip` then destructured map and sum | 2361.091 | 2356.834 | 2342.261–2379.921 |
+| `zip_with` then sum | 1081.257 | 1076.715 | 1075.933–1086.581 |
+
+The two zip workloads both validate 100,010,000. `zip_with` avoids the paired-tuple
+list and destructuring work and takes about 54% less time in this workload.
+Batch sums validate 50,005,000. Native compilation took 822.56 ms in one
+observation, compared with 695.86 ms for the starting revision; generated source
+now includes the scripting helpers.
+
+Raw results are `target/toolkit-final-benchmarks.log` and
+`target/toolkit-baseline-benchmarks.log`. Interactive `benchmark`, REPL `:bench`,
+and debugger `bench` report per-expression timing; the full CLI/Cargo harness
+provides warmup, sampling, and independent expected-result checks.
+
 ## Data workflow additions — 2026-09-26
 
 Measured with `cargo bench --offline --bench rynd_benchmarks`, rustc 1.97.0,
@@ -21,8 +61,7 @@ samples; intervals use the same Student-t method described below.
 These scripts reuse compiled bytecode and the same already-allocated input.
 `find` uses 200 iterations per batch; the other rows use two. `find` performs one
 predicate call here; `filter` performs 10,000 and builds its output before `head`.
-This is a best-case search improvement, not a general VM speedup. Matches near
-the end, or missing matches, still require a full scan.
+Matches near the end, or missing matches, require a full scan.
 
 `filter_map` creates one output list and combines selection/transformation in one
 traversal, but is about **30% slower** on this cheap arithmetic workload. Tagged
@@ -36,7 +75,7 @@ fewer intermediate lists; timing depends on the callback and workload.
 | Native pipeline excluding startup | 703.462 | 697.243 |
 
 The existing VM pipeline is about 2% slower in these observations; Fibonacci and
-native execution remain close to baseline. No across-the-board speedup is claimed.
+native execution remain close to baseline.
 Native compilation was 645.97 ms in the final run versus 526.48 ms in the baseline
 (single observations). The generated runtime now includes the JSON and collection
 implementations. Raw local results are `target/adoption-benchmarks.log` and
@@ -55,16 +94,10 @@ sh scripts/coverage.sh
 cargo bench --offline --bench rynd_benchmarks
 ```
 
-All **131 tests pass in each of debug and release**. The check script includes
-formatting, Clippy with warnings
-as errors, module/Cargo/native workflows, 35 VM/native program probes, three REPL
-probes, the README Rust example, two benchmark-failure probes, and independent
-Python JSON comparisons (124 successful inputs and 20 rejections per target).
-Final source-line coverage is **91.18% (3,858 / 4,231 lines)**; the configured
-90% gate passes. JSON and collection modules measure 99.58% and 99.13%
-respectively. Tests and generated copies are excluded from these line totals.
-Local validation logs are `target/adoption-checks.log` and
-`target/adoption-coverage.log`.
+The measurements below predate selective closure capture analysis. Run the
+verification commands above for the current checkout. Conformance results are
+written to `target/conformance/results.json`, and source-line coverage is written
+to `target/coverage/coverage.json` with an enforced 90% threshold.
 
 ## Earlier overlay measurements
 
@@ -90,11 +123,10 @@ mean of batch means, using 19 degrees of freedom and critical value 2.093.
 | Handwritten typed Rust iterator pipeline, in-process | 2.335 | 2.310 | 2.308–2.362 | 200 |
 
 Native compilation took **543.33 ms** in one observation, outside execution
-timings. This single observation has no confidence interval. The raw run is
-saved locally in `target/claim-audit/rynd-final-bench.log`.
+timings. This single observation has no confidence interval.
 
-A baseline taken immediately before this round of changes is recorded in
-`target/claim-audit/rynd-before-bench.log`. Its native in-process pipeline mean
+A baseline taken immediately before this round of changes had a native
+in-process pipeline mean
 was 937.122 us (95% interval 932.607–941.636), versus 712.157 us now: an observed
 **24% reduction**. The handwritten baseline was similar (2.303 us before,
 2.335 us now). Native calls now borrow argument slices instead of allocating
@@ -105,7 +137,7 @@ VM measurements did not show a consistent speedup: the precompiled pipeline was
 1713.529 us before and 1742.734 us now, while precompiled Fibonacci was 1389.356 us
 before and 1371.644 us now. Shared instruction metadata and reused cleared frame
 buffers reduce allocation work, but the measured end-to-end cost remains dominated
-by the dynamic execution model. No broad VM speedup is claimed.
+by the dynamic execution model.
 
 The pipeline takes integers in `1..10001`, keeps the even values, doubles them,
 and sums them. Every measured implementation validates the result, 50,010,000.
@@ -116,8 +148,7 @@ and execution model, rather than isolating compiler quality.
 
 Generated Rust directly executes expressions and closures, but it retains
 dynamic dispatch, reference-counted values, collection allocation, and runtime
-checks. These results do **not** support a zero-overhead or unconditional
-sub-millisecond claim. Process startup remains a material part of small native
+checks. Process startup remains a material part of small native
 programs, and native-vs-VM results depend on the workload and host.
 
 No other verification commands were launched concurrently with this final run,

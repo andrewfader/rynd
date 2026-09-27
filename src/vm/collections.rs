@@ -33,11 +33,87 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
     let items = list(&args[0])?;
     if matches!(
         name,
-        "sort_by" | "group_by" | "any" | "all" | "find" | "filter_map" | "flat_map"
+        "sort_by"
+            | "group_by"
+            | "any"
+            | "all"
+            | "find"
+            | "filter_map"
+            | "flat_map"
+            | "each"
+            | "partition"
     ) {
         check_arity(&args[1], 1)?;
     }
     match name {
+        "chunks" | "windows" => {
+            let n = i64::try_from(&args[1])?;
+            let n = usize::try_from(n)
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| error("Batch size must be a positive integer"))?;
+            let groups: Vec<Value> = if name == "chunks" {
+                items.chunks(n).map(|v| Value::list(v.to_vec())).collect()
+            } else {
+                items.windows(n).map(|v| Value::list(v.to_vec())).collect()
+            };
+            Ok(Value::list(groups))
+        }
+        "reverse" => Ok(Value::list(items.iter().rev().cloned().collect())),
+        "uniq" => {
+            let mut out = Vec::new();
+            for item in items {
+                if !out.contains(item) {
+                    out.push(item.clone());
+                }
+            }
+            Ok(Value::list(out))
+        }
+        "flatten" => {
+            let mut out = Vec::new();
+            for item in items {
+                out.extend_from_slice(list(item)?);
+            }
+            Ok(Value::list(out))
+        }
+        "each" | "partition" => {
+            let mut yes = Vec::new();
+            let mut no = Vec::new();
+            for item in items {
+                let result = rt.call_ref(&args[1], std::slice::from_ref(item))?;
+                if name == "partition" {
+                    if result.is_truthy() {
+                        yes.push(item.clone());
+                    } else {
+                        no.push(item.clone());
+                    }
+                }
+            }
+            Ok(if name == "each" {
+                args[0].clone()
+            } else {
+                Value::tuple(vec![Value::list(yes), Value::list(no)])
+            })
+        }
+        "zip_with" => {
+            let other = list(&args[1])?;
+            check_arity(&args[2], 2)?;
+            let mut out = Vec::new();
+            for (a, b) in items.iter().zip(other) {
+                out.push(rt.call_ref(&args[2], &[a.clone(), b.clone()])?);
+            }
+            Ok(Value::list(out))
+        }
+        "scan" => {
+            check_arity(&args[2], 2)?;
+            let mut accumulator = args[1].clone();
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                accumulator = rt.call_ref(&args[2], &[accumulator, item.clone()])?;
+                out.push(accumulator.clone());
+            }
+            Ok(Value::list(out))
+        }
         "take" | "skip" => {
             let Value::Int(n) = args[1] else {
                 return Err(error("Count must be a nonnegative integer"));

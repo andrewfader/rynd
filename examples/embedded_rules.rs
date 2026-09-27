@@ -8,7 +8,7 @@ fn main() -> RyndResult<()> {
     let mut engine = RyndEngine::new();
     engine.set_global("minimum", Value::Int(2000));
     engine.register_closure("record", 1, move |args| {
-        recorded.borrow_mut().push(args[0].clone());
+        recorded.borrow_mut().push(bool::try_from(&args[0])?);
         Ok(Value::Nil)
     });
     engine.eval(
@@ -29,10 +29,7 @@ fn main() -> RyndResult<()> {
         engine.call("approve", &[Value::Int(500)])?,
         Value::Bool(false)
     );
-    assert_eq!(
-        *events.borrow(),
-        vec![Value::Bool(true), Value::Bool(false)]
-    );
+    assert_eq!(*events.borrow(), vec![true, false]);
     println!("Decisions: {:?}", events.borrow());
     Ok(())
 }

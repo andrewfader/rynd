@@ -1,0 +1,7 @@
+# Run: rynd run examples/batch_logs.rynd
+# Or stream a file: rynd lines "line if contains(line, 'WARN')" app.log
+let text = "INFO ready\nWARN slow query\nINFO done\nWARN retry\n"
+let warnings = text |> grep('WARN') |> map(\line -> replace(line, 'WARN', 'notice:'))
+warnings |> chunks(2) |> each(\batch -> println(join(batch, "\n")))
+let totals = zip(['queries', 'retries'], [1, 1]) |> to_map()
+println(to_json(totals))

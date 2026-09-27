@@ -3,12 +3,12 @@
 Rynd provides dynamic, expression-oriented application logic compiled to Rust.
 Its native backend emits direct Rust expressions and closures with checked Rynd
 value operations. Meso is the bytecode VM used by interactive and embedded runs.
-The native target does not interpret bytecode. Cargo projects use Rust's normal
+Cargo projects use Rust's normal
 crate system, linker, release profiles, testing tools and native dependencies.
 
 ## Ruby, Elixir and CoffeeScript influences
 
-The influences are semantic choices, not a promise of source compatibility:
+The language combines these expression forms:
 
 - Ruby/Elixir-style `"Hello #{name}"` interpolation accepts full expressions,
   including nested strings and maps. Expressions run once, left to right, and
@@ -21,10 +21,22 @@ The influences are semantic choices, not a promise of source compatibility:
 - List and map comprehensions build transformed collections with an optional
   filter: `[x * 2 for x in xs if x > 0]` and `{x: x * x for x in xs}`.
 - Safe navigation `value?.field` returns nil for missing fields/non-record values.
-  Groovy-style `value ?: fallback` uses truthiness and short-circuits. It is not
-  a nil-only coalescer and does not unwrap `Some` or `Ok`.
+  Groovy-style `value ?: fallback` uses truthiness and short-circuits, returning
+  the original value when truthy.
 - Semicolons are optional; blocks and conditionals return values. Parenthesized
   calls and braced blocks are explicit, so indentation does not change parsing.
+
+Single-quoted strings are literal: `'#{name}'` keeps its text. Only `\\` and
+`\'` escape characters in single quotes. Double quotes support interpolation
+and newline/tab escapes. `and`, `or`, and `not` are aliases for `&&`, `||`, and
+`!`, with the same precedence and short-circuit behavior.
+
+Expression statements and returns accept same-line modifiers:
+`println('ready') if ready`, `work() unless skipped`, and `return 0 if empty`.
+A skipped expression produces nil. Function and lambda parameters accept
+structural patterns, including tuples, lists, variants, and `_`:
+`fn add((a, b)) { a + b }`, `\(a, b) -> a + b`. A mismatched argument pattern
+raises an error. Named bindings across parameters must be unique.
 
 Truthiness is intentionally the existing Rynd/Groovy-like rule: nil, false, zero,
 NaN, empty strings/lists/maps, `None`, and `Err` are falsey; `Some(x)` follows x.
@@ -60,7 +72,8 @@ is deterministic. Indexing accepts negative indices and returns nil out of bound
 strings index Unicode scalar values, not bytes or grapheme clusters.
 
 Functions are `fn name(args) { body }`; lambdas are `\x, y -> expression`.
-Lexical captures retain declaration-time values. Top-level functions resolve
+Lexical captures retain declaration-time values used by the function or its
+nested closures. Captures omit unrelated locals. Functions resolve
 module globals at call time and can call functions declared later in the module.
 `let` creates an immutable binding; a new `let` may shadow it. `let mut` is rejected.
 Explicit `return` is valid inside functions. Ending the final expression with a
@@ -108,33 +121,38 @@ returns values or errors. Rust consumers call compiled Rynd exports directly
 through the generated library API. Integration tests exercise both directions
 and an additional Rust crate dependency.
 
-This is an explicit dynamic ABI, not transparent access to every Rust type,
-trait, macro, borrow or generic from Rynd syntax. Implement strongly typed,
-concurrent, asynchronous or performance-critical components in Rust adapters.
-A Cargo workspace must share one runtime dependency for a common `Value` type.
-The scaffold pins a portable source snapshot because Rynd is not published to a
-registry by this repository; publishing a crate or claiming registry availability
-is not part of creating a local project.
+Rust adapters can use `Value::from` for `i64`, `f64`, `bool`, `String`, `&str`,
+`Vec<T>`, and `BTreeMap<String, T>` where T converts into `Value`. Checked
+`TryFrom<&Value>` and `TryFrom<Value>` conversions extract `i64`, `f64`, `bool`,
+and `String`; `TryFrom<&Value>` also borrows `&str` without copying. Scalar
+conversions require the matching variant and return `RyndError` on mismatches.
+Floats preserve their bits, including non-finite values.
+
+```rust
+engine.register_closure("positive", 1, |args| {
+    Ok(Value::from(i64::try_from(&args[0])? > 0))
+});
+```
+
+Adapters provide an explicit dynamic ABI. Implement strongly typed, concurrent,
+asynchronous or performance-critical components in Rust adapters. A Cargo
+workspace shares one runtime dependency for a common `Value` type. Scaffolds
+pin a portable compiler and runtime source snapshot.
 
 The standalone compiler needs `rustc` at build time; Cargo projects need Cargo
 and a compatible Rust toolchain. Built executables need neither installed.
 Scaffolds use no third-party dependencies until you add some. Standard Cargo
 lockfiles/profiles govern dependencies and release builds.
 
-## Explicit limits
+## Runtime model
 
-Collections and input helpers materialize in memory, and dynamic dispatch has
-measurable cost; this is not a zero-overhead static Rust dialect. Values use `Rc`
-and do not cross threads; create independent runtimes or convert to Rust data.
-Script call depth is bounded at 256. The VM has no untrusted-code sandbox,
-CPU timeout, or memory quota. Native adapters have normal Rust process authority.
-There is no Elixir actor/OTP runtime, distributed scheduler, debugger, automatic
-Rust binding generator, or built-in full CSV implementation. Those are not
-implied by the syntax influences. Rust crates provide such application services
-through the tested adapter boundary.
+Collections and input helpers materialize in memory. Values use `Rc`; create an
+independent runtime per thread or convert values to Rust data for transfer.
+Script call depth is bounded at 256. Scripts and native adapters execute with
+normal process authority. Use Rynd for trusted application logic.
 
-See README for executable workflows and verification;
-BENCHMARKS records measured performance rather than a machine-independent claim.
+See [README.md](README.md) for executable workflows and verification, and
+[BENCHMARKS.md](BENCHMARKS.md) for measured performance.
 
 ## Core builtins
 
@@ -222,3 +240,6 @@ Failed calls release their execution frames and temporary operands. Completed
 output and host effects remain visible. Arguments are evaluated before entering
 `attempt`; wrap an expression in a zero-argument lambda to catch its evaluation:
 `attempt(\ -> 1 / 0, [])`. Host panics propagate outside this recovery mechanism.
+
+See [SCRIPTING.md](SCRIPTING.md) for batch/text/system helpers and streaming CLI
+workflows, and [DEBUGGING.md](DEBUGGING.md) for interactive development.

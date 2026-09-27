@@ -1,5 +1,6 @@
 pub mod benchmarks;
 pub mod build;
+pub mod debugger;
 pub mod error;
 pub mod modules;
 pub mod project;
@@ -101,6 +102,15 @@ impl RyndEngine {
 
     pub fn get_global(&self, name: &str) -> RyndResult<Value> {
         self.machine.get_global(name)
+    }
+
+    /// Sorted session globals for interactive inspection and completion.
+    pub fn globals(&self) -> std::collections::BTreeMap<String, Value> {
+        self.machine
+            .globals
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 
     /// Call a script function defined by an earlier evaluation.

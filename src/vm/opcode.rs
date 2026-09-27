@@ -67,3 +67,10 @@ impl Chunk {
         index
     }
 }
+
+/// Kept separately from bytecode chunks so ordinary programs retain no debug data.
+#[derive(Debug, Clone, Default)]
+pub struct DebugSymbols {
+    pub locals: Vec<Vec<String>>,
+    pub captures: Vec<String>,
+}

@@ -1,5 +1,5 @@
-use rynd::syntax::{lexer::Lexer, parser::Parser};
-use rynd::{RyndEngine, RyndError, Value, transpile};
+use rynd::syntax::needs_more;
+use rynd::{RyndEngine, Value, transpile};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -19,6 +19,9 @@ USAGE:
     rynd eval <expression> [-- args...] Evaluate an expression
     rynd check <file.rynd|->           Check syntax and compilation without execution
     rynd compile <file.rynd|-> [-o out.rs] Generate standalone Rust
+    rynd lines <expr> [files...]      Transform/filter input one line at a time
+    rynd -p <expr> [files...]         Alias for lines; -n suppresses result printing
+    rynd debug <file.rynd> [-- args...] Interactive source debugger
     rynd repl                         Interactive, multiline REPL
     rynd bench                        Run performance benchmarks
     rynd --version                    Print version
@@ -67,6 +70,78 @@ fn execute() -> Result<(), String> {
         return Ok(());
     }
     match command {
+        "lines" | "-p" | "-n" => {
+            let expression = args
+                .get(1)
+                .ok_or("Usage: rynd lines <expression> [files...]")?;
+            let mut engine = RyndEngine::new();
+            let script = engine.compile(expression).map_err(|e| e.to_string())?;
+            let files = args[2..]
+                .strip_prefix(&["--".to_string()])
+                .unwrap_or(&args[2..]);
+            engine.set_global("args", Value::from(files.to_vec()));
+            let mut record = 0_i64;
+            let mut process = |reader: &mut dyn BufRead, file: &str| -> Result<(), String> {
+                for (number, line) in reader.lines().enumerate() {
+                    let line = line.map_err(|e| format!("{file}:{}: {e}", number + 1))?;
+                    record = record.checked_add(1).ok_or("Record count overflow")?;
+                    engine.set_global("line", Value::string(line));
+                    engine.set_global(
+                        "line_number",
+                        Value::Int(i64::try_from(number + 1).map_err(|e| e.to_string())?),
+                    );
+                    engine.set_global("record_number", Value::Int(record));
+                    engine.set_global("file", Value::string(file));
+                    let value = engine
+                        .run(&script)
+                        .map_err(|e| format!("{file}:{}: {e}", number + 1))?;
+                    if command != "-n" && value != Value::Nil {
+                        println!("{value}");
+                    }
+                }
+                Ok(())
+            };
+            if files.is_empty() {
+                process(&mut io::stdin().lock(), "-")?;
+            } else {
+                for file in files {
+                    if file == "-" {
+                        process(&mut io::stdin().lock(), file)?;
+                    } else {
+                        let input = fs::File::open(file).map_err(|e| format!("{file}: {e}"))?;
+                        process(&mut io::BufReader::new(input), file)?;
+                    }
+                }
+            }
+        }
+        "debug" => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: rynd debug <file.rynd> [-- args...]")?;
+            if args.len() > 2 && args[2] != "--" {
+                return Err("Use -- before debugger script arguments".into());
+            }
+            let bundle = rynd::modules::load(path).map_err(|e| e.to_string())?;
+            let (chunks, symbols) = rynd::vm::compiler::Compiler::new()
+                .compile_debug(&bundle.program)
+                .map_err(|e| e.to_string())?;
+            let mut machine = rynd::Machine::new(chunks);
+            machine.debug_symbols = symbols;
+            machine.globals.insert(
+                "args".into(),
+                Value::from(args.get(3..).unwrap_or_default().to_vec()),
+            );
+            let interactive = io::stdin().is_terminal();
+            machine.debugger = Some(Box::new(rynd::debugger::DebugSession::new(
+                io::BufReader::new(io::stdin()),
+                io::stdout(),
+                interactive,
+            )));
+            match machine.run() {
+                Ok(value) => println!("Finished: {value}"),
+                Err(error) => return Err(format!("Debug execution: {error}")),
+            }
+        }
         "new" => {
             let (path, library) = match &args[1..] {
                 [path] => (path, false),
@@ -213,20 +288,6 @@ fn main() {
     }
 }
 
-// Use the language lexer/parser so delimiters in strings and comments don't
-// affect continuation, and a trailing operator can continue on the next line.
-fn needs_more(source: &str) -> bool {
-    let tokens = match Lexer::new(source).tokenize() {
-        Ok(tokens) => tokens,
-        Err(RyndError::LexError { message, .. }) => {
-            return message.starts_with("Unterminated string");
-        }
-        Err(_) => return false,
-    };
-    let eof = tokens.last().unwrap().span.clone();
-    matches!(Parser::new(tokens).parse(), Err(RyndError::ParseError { span, .. }) if span == eof)
-}
-
 fn run_repl() -> Result<(), String> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
@@ -239,6 +300,8 @@ fn run_repl() -> Result<(), String> {
     let mut engine = RyndEngine::new();
     let mut reader = stdin.lock();
     let mut pending = String::new();
+    let mut history: Vec<String> = Vec::new();
+    let mut loaded: Option<String> = None;
     loop {
         if interactive {
             print!(
@@ -274,19 +337,113 @@ fn run_repl() -> Result<(), String> {
         }
         if trimmed == ":help" {
             println!(
-                ":quit — exit; :reset — clear session; :cancel — discard incomplete input\nMultiline functions, lists, strings and expressions are accepted."
+                ":quit; :reset; :cancel; :vars [filter]; :complete prefix; :history; :! N\n:load FILE; :reload; :save FILE; :type EXPR; :time EXPR; :bench N EXPR\n:bench runs the full benchmark suite. _ holds the last result. Multiline input is accepted."
             );
             continue;
         }
-        if pending.is_empty() && trimmed.is_empty() {
+        if pending.is_empty() && trimmed.starts_with(':') {
+            let (command, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+            let rest = rest.trim();
+            match command {
+                ":vars" | ":complete" => {
+                    for (name, value) in engine.globals() {
+                        if (command == ":complete" && name.starts_with(rest))
+                            || (command == ":vars" && name.contains(rest))
+                        {
+                            if command == ":complete" {
+                                println!("{name}");
+                            } else {
+                                println!("{name}: {} = {value}", value.type_name());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                ":history" => {
+                    for (index, source) in history.iter().enumerate() {
+                        println!("{}: {}", index + 1, source.trim_end());
+                    }
+                    continue;
+                }
+                ":save" => {
+                    if let Err(error) = fs::write(rest, history.join("\n")) {
+                        eprintln!("Error: {error}");
+                    }
+                    continue;
+                }
+                ":load" | ":reload" => {
+                    let path = if command == ":reload" {
+                        loaded.as_deref().unwrap_or("")
+                    } else {
+                        rest
+                    };
+                    if path.is_empty() {
+                        eprintln!("Error: :load requires a file before :reload");
+                        continue;
+                    }
+                    match engine.eval_file(path) {
+                        Ok(value) => {
+                            println!("=> {value}");
+                            engine.set_global("_", value);
+                            loaded = Some(path.into());
+                        }
+                        Err(error) => eprintln!("Error: {error}"),
+                    }
+                    continue;
+                }
+                ":type" => line = format!("type_of({rest})"),
+                ":time" => line = format!("benchmark(\\ -> ({rest}), 1)"),
+                ":bench" if rest.is_empty() => {
+                    if let Err(error) = rynd::benchmarks::run() {
+                        eprintln!("Error: {error}");
+                    }
+                    continue;
+                }
+                ":bench" => {
+                    if let Some((n, expression)) = rest.split_once(' ') {
+                        if n.parse::<u64>().is_ok_and(|n| n > 0) {
+                            line = format!("benchmark(\\ -> ({expression}), {n})");
+                        } else {
+                            eprintln!("Error: iterations must be positive");
+                            continue;
+                        }
+                    } else {
+                        eprintln!("Usage: :bench N EXPR");
+                        continue;
+                    }
+                }
+                ":!" => {
+                    if let Some(source) = rest
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|n| history.get(n))
+                    {
+                        line = source.clone();
+                    } else {
+                        eprintln!("Error: no such history entry");
+                        continue;
+                    }
+                }
+                _ => {
+                    eprintln!("Unknown REPL command: {command}");
+                    continue;
+                }
+            }
+        }
+        if pending.is_empty() && line.trim().is_empty() {
             continue;
         }
         pending.push_str(&line);
         if needs_more(&pending) {
             continue;
         }
+        history.push(pending.clone());
         match engine.eval(&pending) {
-            Ok(value) => println!("=> {value}"),
+            Ok(value) => {
+                println!("=> {value}");
+                engine.set_global("_", value);
+            }
             Err(error) => eprintln!("Error: {error}"),
         }
         pending.clear();

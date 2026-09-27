@@ -393,3 +393,80 @@ fn cli_json_pipe() {
     assert!(out.status.success());
     assert_eq!(out.stdout, b"[{\"n\":1},{\"n\":2}]\n");
 }
+
+#[test]
+fn repl_introspection_history_loading_and_measurement() {
+    let dir = format!("target/repl-tools-{}", std::process::id());
+    fs::create_dir_all(&dir).unwrap();
+    let script = format!("{dir}/loaded.rynd");
+    let saved = format!("{dir}/saved.rynd");
+    fs::write(&script, "let loaded = 7\nloaded").unwrap();
+    let input = format!(
+        "let amount = 21\namount * 2\n_ + 1\n:vars amount\n:complete amo\n:type amount\n:time amount * 2\n:bench 3 amount + 1\n:history\n:! 2\n:save {saved}\n:load {script}\n:reload\nloaded\n:bench zero 1\n:! 999\n:unknown\nquit\n"
+    );
+    let out = cli(&["repl"], &input);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for expected in [
+        "=> 42",
+        "=> 43",
+        "amount: int = 21",
+        "amount\n",
+        "=> int",
+        "\"iterations\": 3",
+        "\"result\": 22",
+        "1: let amount = 21",
+        "=> 7",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+    }
+    assert!(fs::read_to_string(saved).unwrap().contains("amount * 2"));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("iterations must be positive"));
+    assert!(stderr.contains("no such history entry"));
+    assert!(stderr.contains("Unknown REPL command"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn streaming_lines_transform_filter_number_and_report_errors() {
+    let out = cli(
+        &["lines", "upper(line) if contains(line, 'warn')"],
+        "ok\nwarn one\r\nwarn two\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"WARN ONE\nWARN TWO\n");
+    assert_eq!(cli(&["-p", "line_number"], "a\n\nb").stdout, b"1\n2\n3\n");
+    assert_eq!(cli(&["-n", "println(line)"], "a\nb\n").stdout, b"a\nb\n");
+    assert!(cli(&["-n", "line"], "a\n").stdout.is_empty());
+    let out = cli(
+        &["lines", "parse_json(line).name"],
+        "{\"name\":\"Ada\"}\nbad\n",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.stdout, b"Ada\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("-:2:"));
+    let dir = format!("target/line-tools-{}", std::process::id());
+    fs::create_dir_all(&dir).unwrap();
+    let a = format!("{dir}/a");
+    let b = format!("{dir}/b");
+    fs::write(&a, "one\ntwo\n").unwrap();
+    fs::write(&b, "three\n").unwrap();
+    let out = cli(
+        &["lines", "[line_number, record_number, line]", "--", &a, &b],
+        "",
+    );
+    assert_eq!(out.stdout, b"[1, 1, one]\n[2, 2, two]\n[1, 3, three]\n");
+    assert!(out.status.success());
+    assert_eq!(
+        cli(&["lines", "line", "missing-rynd-test-file"], "")
+            .status
+            .code(),
+        Some(1)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
