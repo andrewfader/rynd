@@ -93,9 +93,25 @@ pub fn globals() -> HashMap<String, Value> {
     .iter()
     .copied()
     .chain(super::scripting::BUILTINS.iter().copied())
-    .chain(super::sockets::BUILTINS.iter().copied())
-    .chain(super::concurrency::BUILTINS.iter().copied())
     {
+        globals.insert(
+            name.into(),
+            Value::Builtin {
+                name: name.into(),
+                arity,
+            },
+        );
+    }
+    for (name, arity) in super::sockets::BUILTINS.iter().copied() {
+        globals.insert(
+            name.into(),
+            Value::Builtin {
+                name: name.into(),
+                arity,
+            },
+        );
+    }
+    for (name, arity) in super::concurrency::BUILTINS.iter().copied() {
         globals.insert(
             name.into(),
             Value::Builtin {
@@ -553,12 +569,12 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
         }
         _ => {
             if super::sockets::BUILTINS.iter().any(|(b, _)| *b == name) {
-                super::sockets::call(rt, name, args)
-            } else if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
-                super::concurrency::call(rt, name, args)
-            } else {
-                super::scripting::call(rt, name, args)
+                return super::sockets::call(rt, name, args);
             }
+            if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
+                return super::concurrency::call(rt, name, args);
+            }
+            super::scripting::call(rt, name, args)
         }
     }
 }

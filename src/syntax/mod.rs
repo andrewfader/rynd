@@ -4,6 +4,8 @@ pub mod lexer;
 pub mod parser;
 pub mod token;
 
+pub use ast::{Expr, ExprKind, Literal, Pattern, Program, Stmt};
+
 // Use the language lexer/parser so delimiters in strings and comments don't
 // affect continuation, and a trailing operator can continue on the next line.
 pub fn needs_more(source: &str) -> bool {

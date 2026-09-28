@@ -6,6 +6,7 @@ pub mod json;
 pub mod machine;
 pub mod opcode;
 pub mod runtime;
+pub mod safety;
 pub mod scripting;
 pub mod sockets;
 pub mod value;

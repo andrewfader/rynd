@@ -131,6 +131,7 @@ Use one engine per thread for trusted scripts. See the
 - [Benchmarks](BENCHMARKS.md) — timings with the methodology attached.
 - [Requirements](REQUIREMENTS.md) — supported workflows and verification.
 - [Codebase review](REVIEW.md) — implementation decisions and development priorities.
+- [Security](SECURITY.md) — sandboxing guidance for untrusted scripts.
 
 ```sh
 cargo test --offline

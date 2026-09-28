@@ -1,7 +1,26 @@
+[workspace]
+members = ["."]
+
 [package]
 name = "rynd"
 version = "0.1.0"
 edition = "2024"
+description = "A small functional language for Rust applications, with a bytecode VM (Meso) and a Rust transpiler."
+license = "BSD-3-Clause"
+keywords = ["language", "scripting", "embedded", "vm", "transpiler"]
+categories = ["development-tools", "parser-implementations"]
+
+[features]
+# Cranelift IR generation, verification, and interpreter execution. Builds
+# real Cranelift IR for tiny Rynd functions, verifies it, and runs the
+# Cranelift interpreter to produce the answer. Opt-in because it pulls
+# in a Cranelift dependency tree.
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-interpreter",
+    "dep:target-lexicon",
+]
 
 [dependencies]
 
@@ -19,3 +38,18 @@ path = "src/main.rs"
 name = "rynd_benchmarks"
 harness = false
 
+[dependencies.cranelift-codegen]
+version = "0.136"
+optional = true
+
+[dependencies.cranelift-frontend]
+version = "0.136"
+optional = true
+
+[dependencies.cranelift-interpreter]
+version = "0.136"
+optional = true
+
+[dependencies.target-lexicon]
+version = "0.13"
+optional = true

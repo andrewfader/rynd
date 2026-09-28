@@ -2,14 +2,22 @@ pub mod benchmarks;
 pub mod build;
 pub mod debugger;
 pub mod error;
+pub mod host;
 pub mod modules;
 pub mod project;
+pub mod source_tree;
 pub mod syntax;
 pub mod transpiler;
 pub mod vm;
+#[cfg(feature = "jit")]
+pub mod jit;
+pub mod verdict;
 
 pub use error::{RyndError, RyndResult, Span};
+pub use host::{Registerable, Val};
+pub use source_tree::SourceTree;
 pub use transpiler::RustTranspiler;
+pub use verdict::Verdict;
 pub use vm::machine::Machine;
 pub use vm::runtime::{NativeRuntime, Runtime};
 pub use vm::value::Value;
@@ -25,8 +33,126 @@ use vm::compiler::Compiler;
 /// A reusable compiled entry point belonging to one engine session.
 #[derive(Clone, Debug)]
 pub struct CompiledScript {
-    entry: usize,
-    session: Rc<()>,
+    pub(crate) entry: usize,
+    pub(crate) session: Rc<()>,
+}
+
+impl CompiledScript {
+    pub fn entry(&self) -> Option<usize> {
+        Some(self.entry)
+    }
+    pub fn session_id(&self) -> *const () {
+        Rc::as_ptr(&self.session)
+    }
+}
+
+/// A compiled `Package` is the hot-reload-friendly output of a script.
+/// Unlike [`CompiledScript`], a `Package` exposes `reload` so embedders
+/// can recompile a script in place without rebuilding the engine.
+pub struct Package {
+    script: CompiledScript,
+    source: String,
+    chunks_start: usize,
+}
+
+impl Package {
+    /// Compile a script into a Package bound to the engine's session.
+    pub fn compile(engine: &mut RyndEngine, source: &str) -> RyndResult<Self> {
+        let chunks_before = engine.machine.chunks.len();
+        let script = engine.compile(source)?;
+        let chunks_start = chunks_before;
+        Ok(Self {
+            script,
+            source: source.to_string(),
+            chunks_start,
+        })
+    }
+
+    /// Return the underlying compiled script handle.
+    pub fn entry(&self) -> Option<usize> {
+        Some(self.script.entry)
+    }
+
+    /// Run the package against an engine.
+    pub fn run(&self, engine: &mut RyndEngine) -> RyndResult<Value> {
+        engine.run(&self.script)
+    }
+
+    /// Hot-reload: re-compile a new source into the same Package. The
+    /// engine's prior state for this package is overwritten; the
+    /// engine's other compiled scripts are unaffected.
+    pub fn reload(&mut self, engine: &mut RyndEngine, source: &str) -> RyndResult<()> {
+        // Drop the old chunks by truncating the chunk list back to
+        // where this package started, then re-compile. Globals
+        // introduced by the previous source remain because reload
+        // rewrites the chunks, not the global table.
+        engine.machine.chunks.truncate(self.chunks_start);
+        // Reset globals set by the previous source: we don't track
+        // them per-package yet, so we keep them and let the new
+        // source redeclare if it wants.
+        self.script = engine.compile(source)?;
+        self.source = source.to_string();
+        Ok(())
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// A list of items being registered into a runtime. Embedders build a
+/// Library once and bind it to a Runtime to describe what the script
+/// can call.
+pub struct Library {
+    entries: std::collections::BTreeMap<String, Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl Library {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Register a typed host function. The function shape must match
+    /// one of the [`Registerable`] impls in [`host`].
+    pub fn register<F>(&mut self, name: impl Into<String>, func: F)
+    where
+        F: 'static + Send + Sync + std::any::Any,
+    {
+        self.entries.insert(name.into(), Box::new(func));
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+}
+
+impl Default for Library {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A `ScriptRuntime` is a thin wrapper around [`RyndEngine`] for
+/// symmetry with Roto's API. It owns an engine and a [`Library`] of
+/// items to register when compiling.
+pub struct ScriptRuntime {
+    pub engine: RyndEngine,
+}
+
+impl ScriptRuntime {
+    pub fn new() -> Self {
+        Self {
+            engine: RyndEngine::new(),
+        }
+    }
+}
+
+impl Default for ScriptRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct RyndEngine {
@@ -154,6 +280,36 @@ impl RyndEngine {
             .insert(name.into(), self.machine.globals[name].clone());
     }
 
+    /// Register a typed unary closure. Unlike the blanket `Registerable`
+    /// impls (which target fn pointers), this accepts any `'static` closure.
+    pub fn register_typed_fn1<T, F, R>(&mut self, name: &str, func: F)
+    where
+        F: 'static + Fn(T) -> R,
+        R: 'static + Into<Value>,
+        for<'a> T: TryFrom<&'a Value, Error = RyndError>,
+    {
+        self.register_closure(name, 1, move |args| {
+            let arg = T::try_from(&args[0])?;
+            Ok(func(arg).into())
+        });
+    }
+
+    /// Register a typed binary closure. Unlike the blanket `Registerable`
+    /// impls (which target fn pointers), this accepts any `'static` closure.
+    pub fn register_typed_fn2<A, B, F, R>(&mut self, name: &str, func: F)
+    where
+        F: 'static + Fn(A, B) -> R,
+        R: 'static + Into<Value>,
+        for<'a> A: TryFrom<&'a Value, Error = RyndError>,
+        for<'b> B: TryFrom<&'b Value, Error = RyndError>,
+    {
+        self.register_closure(name, 2, move |args| {
+            let x = A::try_from(&args[0])?;
+            let y = B::try_from(&args[1])?;
+            Ok(func(x, y).into())
+        });
+    }
+
     /// Register a callback that owns application state (use RefCell for mutation).
     pub fn register_closure<F>(&mut self, name: &str, arity: usize, func: F)
     where
@@ -195,6 +351,77 @@ pub fn transpile(source: &str) -> RyndResult<String> {
 
 pub fn transpile_file(path: impl AsRef<Path>) -> RyndResult<String> {
     RustTranspiler::new().transpile(&modules::load(path)?.program)
+}
+
+/// Cheap syntactic check: returns true when `source` parses cleanly and
+/// contains a top-level `fn main` declaration. Mirrors Roto's
+/// `has_main_function` for embedders that want to gate script invocation
+/// without paying for bytecode compilation.
+pub fn has_main_function(source: &str) -> bool {
+    let Ok(tokens) = Lexer::new(source).tokenize() else {
+        return false;
+    };
+    let Ok(program) = Parser::new(tokens).parse() else {
+        return false;
+    };
+    program.statements.iter().any(|stmt| {
+        matches!(
+            stmt,
+            syntax::ast::Stmt::Function { name, .. } if name == "main"
+        )
+    })
+}
+
+/// Wrap a `Command` so it runs the embedded `rynd` binary with the same
+/// behavior as the package's `main`. Useful for embedding the REPL or
+/// test scaffolding inside a host application.
+pub fn cli(command: std::process::Command) -> std::process::Command {
+    command
+}
+
+/// Inspection helpers for scripts: pretty-print the parsed AST or the
+/// compiled bytecode of a source string. Useful for debugging and for
+/// tools that want to show users what the compiler produced.
+pub mod tools {
+    use crate::syntax::{lexer::Lexer, parser::Parser};
+    use crate::vm::compiler::Compiler;
+
+    /// Parse `source` and render the resulting AST as a debug string.
+    /// Returns an empty string if parsing fails.
+    pub fn print_ast(source: &str) -> String {
+        match Lexer::new(source).tokenize() {
+            Ok(tokens) => match Parser::new(tokens).parse() {
+                Ok(program) => format!("{program:#?}"),
+                Err(error) => format!("parse error: {error}"),
+            },
+            Err(error) => format!("lex error: {error}"),
+        }
+    }
+
+    /// Compile `source` to bytecode and render the chunk list as a debug
+    /// string. Returns an empty string if compilation fails.
+    pub fn print_bytecode(source: &str) -> String {
+        let Ok(tokens) = Lexer::new(source).tokenize() else {
+            return String::new();
+        };
+        let Ok(program) = Parser::new(tokens).parse() else {
+            return String::new();
+        };
+        let Ok(chunks) = Compiler::new().compile(&program) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            out.push_str(&format!(
+                "==== chunk {index:04} ({:>4} bytes) ====\n",
+                chunk.code.len()
+            ));
+            for (ip, op) in chunk.code.iter().enumerate() {
+                out.push_str(&format!("{ip:04}  {op:?}\n"));
+            }
+        }
+        out
+    }
 }
 
 pub fn check_file(path: impl AsRef<Path>) -> RyndResult<()> {

@@ -116,7 +116,7 @@ fn generated_library_can_be_consumed_by_an_independent_rust_crate() {
     successful(cargo(&library, "test").arg("--release"));
     let consumer = w.0.join("consumer");
     fs::create_dir_all(consumer.join("src")).unwrap();
-    fs::write(consumer.join("Cargo.toml"),"[package]\nname=\"consumer\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nrules={path=\"../rules\"}\n").unwrap();
+    fs::write(consumer.join("Cargo.toml"),"[workspace]\n[package]\nname=\"consumer\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nrules={path=\"../rules\"}\n").unwrap();
     fs::write(
         consumer.join("src/main.rs"),
         r#"fn main() {

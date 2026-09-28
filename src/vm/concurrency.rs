@@ -1,6 +1,6 @@
 //! Structured concurrency, green fibers, actors, and channels for Rynd.
 use super::{
-    runtime::{error, Runtime},
+    runtime::{Runtime, error},
     value::Value,
 };
 use crate::error::RyndResult;

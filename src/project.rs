@@ -36,7 +36,9 @@ pub fn new(path: impl AsRef<Path>, library: bool) -> RyndResult<()> {
         path,
         "Cargo.toml",
         &format!(
-            r#"[package]
+            r#"[workspace]
+
+[package]
 name = {name:?}
 version = "0.1.0"
 edition = "2024"
@@ -123,7 +125,7 @@ you add. Update the snapshot deliberately when upgrading Rynd.
         path,
         ".rynd/compiler/Cargo.toml",
         &format!(
-            "[package]\nname = \"rynd\"\nversion = {:?}\nedition = \"2024\"\nautobins = false\n[lib]\npath = \"src/lib.rs\"\n",
+            "\n[package]\nname = \"rynd\"\nversion = {:?}\nedition = \"2024\"\nautobins = false\n\n[features]\ndefault = [\"transpiler\", \"project\"]\ntranspiler = []\nproject = [\"transpiler\"]\n\n[dependencies]\nariadne = \"0.6\"\n\n[lib]\npath = \"src/lib.rs\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )?;
@@ -205,10 +207,12 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/build.rs", include_str!("build.rs")),
     ("src/debugger.rs", include_str!("debugger.rs")),
     ("src/error.rs", include_str!("error.rs")),
+    ("src/host.rs", include_str!("host.rs")),
     ("src/lib.rs", include_str!("lib.rs")),
     ("src/main.rs", include_str!("main.rs")),
     ("src/modules.rs", include_str!("modules.rs")),
     ("src/project.rs", include_str!("project.rs")),
+    ("src/source_tree.rs", include_str!("source_tree.rs")),
     ("src/syntax/captures.rs", include_str!("syntax/captures.rs")),
     ("src/syntax/ast.rs", include_str!("syntax/ast.rs")),
     ("src/syntax/lexer.rs", include_str!("syntax/lexer.rs")),
@@ -220,11 +224,13 @@ const TOOLCHAIN: &[(&str, &str)] = &[
         "src/transpiler/rust_codegen.rs",
         include_str!("transpiler/rust_codegen.rs"),
     ),
+    ("src/verdict.rs", include_str!("verdict.rs")),
     ("src/vm/compiler.rs", include_str!("vm/compiler.rs")),
     ("src/vm/machine.rs", include_str!("vm/machine.rs")),
     ("src/vm/mod.rs", include_str!("vm/mod.rs")),
     ("src/vm/opcode.rs", include_str!("vm/opcode.rs")),
     ("src/vm/runtime.rs", include_str!("vm/runtime.rs")),
+    ("src/vm/safety.rs", include_str!("vm/safety.rs")),
     ("src/vm/scripting.rs", include_str!("vm/scripting.rs")),
     ("src/vm/json.rs", include_str!("vm/json.rs")),
     ("src/vm/collections.rs", include_str!("vm/collections.rs")),

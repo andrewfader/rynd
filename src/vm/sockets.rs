@@ -1,6 +1,6 @@
 //! Native TCP sockets and HTTP parsing for Rynd.
 use super::{
-    runtime::{error, Runtime},
+    runtime::{Runtime, error},
     value::Value,
 };
 use crate::error::{RyndError, RyndResult};
