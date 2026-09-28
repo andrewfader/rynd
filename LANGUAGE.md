@@ -36,7 +36,18 @@ Expression statements and returns accept same-line modifiers:
 A skipped expression produces nil. Function and lambda parameters accept
 structural patterns, including tuples, lists, variants, and `_`:
 `fn add((a, b)) { a + b }`, `\(a, b) -> a + b`. A mismatched argument pattern
-raises an error. Named bindings across parameters must be unique.
+raises an error. Named bindings across parameters must be unique. Lambdas support
+both backslash syntax (`\x, y -> x + y`), pipe syntax (`|x, y| x + y`), and
+zero-argument forms (`\ -> 42`).
+
+Trailing commas are permitted in function definitions, call arguments, tuples,
+lists, and pattern destructuring: `(a, b,)`, `[1, 2,]`, `fn f(x, y,) { x + y }`.
+Strings support repetition via `*` (`"abc" * 3` produces `"abcabcabc"`; non-positive
+counts yield `""`) and mixed concatenation via `+` (`"count: " + 42` produces
+`"count: 42"`, `42 + " items"` produces `"42 items"`). Safe navigation operates
+safely on scalar values without errors (`42?.missing` produces nil). Tagged variants
+support field introspection: `.tag` (or `.name`) returns the variant's name, and
+`.value` accesses its payload (yielding nil for payloadless variants like `None`).
 
 Truthiness is intentionally the existing Rynd/Groovy-like rule: nil, false, zero,
 NaN, empty strings/lists/maps, `None`, and `Err` are falsey; `Some(x)` follows x.
@@ -219,6 +230,149 @@ once their answer is known. `filter_map` combines selection and transformation
 into a single traversal and output list; tagged-value allocation and callbacks
 still have a cost. `sort_by` caches keys before its O(n log n) stable sort. Each
 unary callback is arity-checked even for an empty input.
+
+## Map operations and dynamic dispatch
+
+Rynd provides functional map manipulation builtins and dynamic dispatch helpers:
+
+| Function | Behavior |
+| --- | --- |
+| `merge(m1, m2)` | Returns a new map containing all key-value pairs from `m1` and `m2`. Keys present in both maps take their values from `m2`. |
+| `put(map, key, value)` | Returns a new immutable map with `key` set to `value`. `key` must be a string. |
+| `get(map, key, default)` | Retrieves the value associated with `key`. If `key` is absent or its value is `nil`, returns `default`. |
+| `has_key(map, key)` | Returns `true` if `map` contains the specified string `key`, `false` otherwise. |
+| `delete(map, key)` | Returns a new immutable map with `key` removed. |
+| `apply(fn_or_name, args)` | Dynamically invokes a function (by global string name or callable value) with arguments passed as a list. |
+| `call_method(map, method_name, args)` | Object-style dynamic dispatch. Retrieves the function at `map[method_name]` and invokes it with `map` as `self` followed by `args`. |
+
+```rynd
+let base_config = {"host": "localhost", "port": 8080}
+let prod_config = base_config |> put("port", 443) |> put("ssl", true)
+
+let account = {
+    "balance": 100,
+    "deposit": \self, amount -> put(self, "balance", self.balance + amount),
+    "summary": \self -> "Balance: #{self.balance}"
+}
+let updated = call_method(account, "deposit", [50])
+println(call_method(updated, "summary", [])) # Balance: 150
+```
+
+## Structured concurrency, fibers, actors, and channels
+
+Rynd provides green fibers, nurseries with automatic failure cascading, actor mailboxes, and CSP channels:
+
+### Green fibers and structured nurseries
+
+- `spawn(\ -> expression)` launches a cooperative fiber and returns a `Fiber(id)` handle.
+- `await_fiber(handle)` pauses the current execution until the fiber or actor finishes, returning its result or propagating any error.
+- `yield_fiber()` cooperatively pauses the fiber to allow scheduler progress.
+- `self_id()` returns the integer identifier of the current fiber.
+- `nursery(\n -> body)` creates a structured concurrency scope. Inside `body`, child tasks are scheduled with `n.spawn(\ -> task_body)`. If any child task fails, the nursery immediately cancels sibling tasks and propagates the error to the caller. When all tasks succeed, `nursery` returns a list containing every child task's result in spawn order.
+
+```rynd
+# Structured nursery: parallel execution with fail-fast cancellation
+let results = nursery(\n -> {
+    n.spawn(\ -> fetch_metrics("server-1"))
+    n.spawn(\ -> fetch_metrics("server-2"))
+    n.spawn(\ -> fetch_metrics("server-3"))
+})
+```
+
+### Actor model and mailboxes
+
+- `spawn_actor(\mailbox -> loop)` spawns an actor fiber with an isolated mailbox and returns an `Actor(id)` handle.
+- `send(actor, message)` enqueues a message into the actor's mailbox asynchronously.
+- `receive(mailbox)` blocks until a message arrives in the mailbox and dequeues it.
+- `receive_timeout(mailbox, timeout_ms)` awaits a message up to `timeout_ms` milliseconds; returns `Some(message)` on receipt or `None` on expiration.
+- `create_mailbox()` constructs an independent mailbox handle.
+
+```rynd
+let worker = spawn_actor(\mb -> {
+    let task = receive(mb)
+    process(task)
+})
+send(worker, {"job": "resize_image", "file": "avatar.png"})
+let result = await_fiber(worker)
+```
+
+### CSP channels
+
+- `channel()` creates an unbounded FIFO channel and returns a 2-tuple `(tx, rx)`.
+- `channel_send(tx, value)` writes a value into the channel.
+- `channel_recv(rx)` blocks until a value is available and removes it.
+- `channel_try_recv(rx)` non-blockingly checks the channel, returning `Some(value)` if available or `None` if empty.
+
+```rynd
+let (tx, rx) = channel()
+let producer = spawn(\ -> {
+    [10, 20, 30] |> each(\x -> channel_send(tx, x * 2))
+})
+await_fiber(producer)
+let first = channel_recv(rx) # 20
+```
+
+## TCP networking, HTTP streaming, and web frameworks
+
+Rynd supports native TCP sockets, HTTP/1.1 parsing and streaming, and a Plug-based modular web framework inspired by Sinatra and Phoenix:
+
+### Native TCP sockets
+
+| Function | Behavior |
+| --- | --- |
+| `tcp_listen(addr)` | Binds a TCP listener to `addr` (e.g. `"127.0.0.1:8080"`). Returns a `TcpListener(id)` handle. |
+| `tcp_accept(listener)` | Accepts an incoming connection. Returns `(stream, peer_addr)` pair or `nil` if non-blocking and no connection is pending. |
+| `tcp_connect(addr)` | Connects to a remote TCP endpoint. Returns a `TcpStream(id)` handle. |
+| `tcp_local_addr(listener)` | Returns the local bound address string (useful with `"127.0.0.1:0"` port allocation). |
+| `socket_read(stream, max_bytes)` | Reads up to `max_bytes` from the stream as a UTF-8 string. |
+| `socket_read_bytes(stream, max_bytes)` | Reads up to `max_bytes` from the stream as an integer list of bytes (`[0–255]`). |
+| `socket_write(stream, data)` | Writes a UTF-8 string or a byte list to the stream. Returns the number of bytes written. |
+| `socket_close(handle)` | Closes a TCP stream or listener. |
+| `socket_set_nonblocking(handle, bool)` | Toggles non-blocking mode on the listener or stream. |
+
+### HTTP parsing and chunked transfer
+
+- `parse_http_request(raw_text)` parses an HTTP/1.1 wire request into a record:
+  `{"method": "GET", "path": "/path", "version": "HTTP/1.1", "headers": {"host": "..."}, "body": "..."}`.
+- `format_http_response(status, headers, body)` serializes a standard HTTP/1.1 response string with appropriate status phrase and calculated `Content-Length`.
+- `socket_write_http_chunk(stream, data)` streams a chunk formatted as `HEX_LEN\r\nDATA\r\n`.
+- `socket_finish_http_chunks(stream)` emits the terminal HTTP chunk `0\r\n\r\n`.
+- `socket_read_chunk(stream, max_bytes)` reads a chunked stream payload.
+
+### Plug web framework and routing
+
+Rynd includes a composable pipeline architecture for web services:
+
+| Function | Behavior |
+| --- | --- |
+| `conn(method, path)` | Initializes a connection map: `{"method": method, "path": path, "params": {}, "query": {}, "headers": {}, "body": "", "status": 200, "resp_headers": {"content-type": "text/html; charset=utf-8"}, "resp_body": "", "halted": false}`. |
+| `match_route(path, pattern)` | Compares `path` against a route pattern with `:param` capture segments and `*wildcard` rest parameters. Returns `Some(params_map)` or `None`. |
+| `halt(conn)` | Sets `conn.halted = true` to short-circuit downstream plugs in a pipeline. |
+| `put_status(conn, status)` | Updates the response status code on `conn`. |
+| `put_resp_header(conn, key, val)` | Adds or overrides a response header on `conn`. |
+| `put_resp_body(conn, body)` | Replaces the response body on `conn`. |
+| `text_response(conn, status, body)` | Configures status, sets `content-type: text/plain`, updates body, and halts `conn`. |
+| `json_response(conn, status, data)` | Serializes `data` to JSON via `to_json()`, sets `content-type: application/json`, and halts `conn`. |
+| `html_response(conn, status, html)` | Configures status, sets `content-type: text/html`, updates body, and halts `conn`. |
+| `plug_send(conn, stream)` | Formats the final HTTP response and writes it to the active TCP stream. |
+
+```rynd
+fn router(conn) {
+    if conn.halted { return conn }
+
+    let m = match_route(conn.path, "/api/users/:id")
+    if m.tag == "Some" and conn.method == "GET" {
+        return json_response(conn, 200, {"id": m.value.id, "active": true})
+    }
+
+    text_response(conn, 404, "Not Found")
+}
+
+let response = conn("GET", "/api/users/42")
+    |> (\c -> put_resp_header(c, "x-request-id", "req-1"))()
+    |> router()
+println(response.resp_body) # {"active":true,"id":"42"}
+```
 
 ## Recoverable errors
 

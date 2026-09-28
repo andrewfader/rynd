@@ -1,15 +1,21 @@
 //! Native TCP sockets and HTTP parsing for Rynd.
 use super::{
-    runtime::{Runtime, error},
+    runtime::{error, Runtime},
     value::Value,
 };
 use crate::error::{RyndError, RyndResult};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+
+/// Default timeout for outbound `tcp_connect` calls. Long enough to survive a
+/// kernel SYN backlog hiccup, short enough that a broken loopback stack fails
+/// fast instead of hanging the script for the default 60+ second retry chain.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const BUILTINS: &[(&str, usize)] = &[
     ("tcp_listen", 1),
@@ -113,7 +119,17 @@ pub fn call(_rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Val
 
         "tcp_connect" => {
             let addr = text(&args[0])?;
-            let stream = TcpStream::connect(addr).map_err(io)?;
+            // Parse to a `SocketAddr` so we can pass it to `connect_timeout`;
+            // parsing accepts both `"host:port"` and `""` (for an unspecified
+            // listener) — fall back to a manual `connect()` if the string is
+            // not a literal SocketAddr (e.g. an interface name).
+            let parsed: Option<SocketAddr> = addr.parse().ok();
+            let stream = match parsed {
+                Some(socket_addr) => {
+                    TcpStream::connect_timeout(&socket_addr, TCP_CONNECT_TIMEOUT).map_err(io)?
+                }
+                None => TcpStream::connect(addr).map_err(io)?,
+            };
             let stream_id = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
             STREAMS.lock().unwrap().insert(stream_id, stream);
             Ok(Value::variant("TcpStream", vec![Value::Int(stream_id)]))

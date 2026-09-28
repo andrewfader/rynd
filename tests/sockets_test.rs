@@ -1,7 +1,17 @@
 use rynd::{RyndEngine, Value};
 
+#[path = "common/socket_lock.rs"]
+mod socket_lock;
+
+/// Acquire the shared socket-test lock so parallel test binaries don't race on
+/// ephemeral ports. Drop the guard at the end of the test to release it.
+fn locked() -> socket_lock::SocketLock {
+    socket_lock::acquire().expect("acquire shared socket test lock")
+}
+
 #[test]
 fn test_parse_http_request_get() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let raw = "GET /users?sort=asc HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\n\r\n"
@@ -23,6 +33,7 @@ fn test_parse_http_request_get() {
 
 #[test]
 fn test_parse_http_request_post_with_body() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let raw = "POST /api/deploy HTTP/1.1\r\nHost: api.cluster.local\r\nContent-Type: application/json\r\n\r\n{\"nodes\": 3}"
@@ -44,6 +55,7 @@ fn test_parse_http_request_post_with_body() {
 
 #[test]
 fn test_format_http_response() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let body = '{"status": "ok"}'
@@ -63,6 +75,7 @@ fn test_format_http_response() {
 
 #[test]
 fn test_format_http_response_404() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         format_http_response(404, {}, "Not Found")
@@ -79,6 +92,7 @@ fn test_format_http_response_404() {
 
 #[test]
 fn test_tcp_socket_loopback_roundtrip() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let server = tcp_listen("127.0.0.1:0")
@@ -112,17 +126,27 @@ fn test_tcp_socket_loopback_roundtrip() {
 
 #[test]
 fn test_socket_nonblocking_and_bytes() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
+    // Confirm non-blocking accept on a listener with no pending client returns
+    // nil; then establish a connection normally, accept it, flip the accepted
+    // stream to non-blocking, and verify a read with no data returns nil and a
+    // subsequent read returns the bytes that arrived.
     let code = r#"
         let server = tcp_listen("127.0.0.1:0")
         socket_set_nonblocking(server, true)
         let non_accepted = tcp_accept(server)
 
         let addr = tcp_local_addr(server)
+        socket_set_nonblocking(server, false)
         let client = tcp_connect(addr)
         let accepted = tcp_accept(server)
         let server_stream = accepted[0]
 
+        socket_set_nonblocking(server_stream, true)
+        let empty_read = socket_read_bytes(server_stream, 10)
+
+        socket_set_nonblocking(server_stream, false)
         socket_write(client, [1, 2, 3, 4])
         let bytes = socket_read_bytes(server_stream, 10)
 
@@ -130,12 +154,13 @@ fn test_socket_nonblocking_and_bytes() {
         socket_close(server_stream)
         socket_close(server)
 
-        [non_accepted, bytes]
+        [non_accepted, empty_read, bytes]
     "#;
     let res = engine.eval(code).expect("Eval failed");
     assert_eq!(
         res,
         Value::list(vec![
+            Value::Nil,
             Value::Nil,
             Value::list(vec![
                 Value::Int(1),

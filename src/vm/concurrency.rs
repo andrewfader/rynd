@@ -1,6 +1,6 @@
 //! Structured concurrency, green fibers, actors, and channels for Rynd.
 use super::{
-    runtime::{Runtime, error},
+    runtime::{error, Runtime},
     value::Value,
 };
 use crate::error::RyndResult;
@@ -20,10 +20,13 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("receive", 1),
     ("receive_timeout", 2),
     ("create_mailbox", 0),
+    ("close_mailbox", 1),
     ("channel", 0),
     ("channel_send", 2),
     ("channel_recv", 1),
     ("channel_try_recv", 1),
+    ("close_channel", 1),
+    ("is_channel_closed", 1),
     ("self_id", 0),
 ];
 
@@ -87,15 +90,15 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             } else {
                 extract_handle(&args[0], "Actor")?
             };
-            let (task, cached_res) = FIBERS.with(|f| {
-                let fibers = f.borrow();
-                let entry = fibers
-                    .get(&id)
-                    .ok_or_else(|| error("Invalid or expired Fiber handle"))?;
-                Ok((entry.task.clone(), entry.result.clone()))
-            })?;
 
-            if let Some(res) = cached_res {
+            // Pop the entry: a fiber is one-shot — the first await drives the
+            // task, caches the result, and removes the entry so a repeat
+            // await surfaces a clean "expired" error instead of silently
+            // re-executing or accumulating closures.
+            let entry = FIBERS.with(|f| f.borrow_mut().remove(&id));
+            let entry = entry.ok_or_else(|| error("Invalid or expired Fiber handle"))?;
+
+            if let Some(res) = entry.result {
                 return res;
             }
 
@@ -107,16 +110,17 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                 old
             });
 
-            let exec_res = rt.call_ref(&task, &[]);
+            let exec_res = rt.call_ref(&entry.task, &[]);
 
             CURRENT_FIBER.with(|cf| {
                 *cf.borrow_mut() = old_id;
             });
 
-            FIBERS.with(|f| {
-                if let Some(entry) = f.borrow_mut().get_mut(&id) {
-                    entry.result = Some(exec_res.clone());
-                }
+            // For actors, also drop the mailbox queue. Actors own their mailbox
+            // for life; once the actor body returns, the mailbox is no longer
+            // observable and the queue can be released.
+            MAILBOXES.with(|m| {
+                m.borrow_mut().remove(&id);
             });
 
             exec_res
@@ -185,6 +189,18 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                 m.borrow_mut().insert(id, VecDeque::new());
             });
             Ok(Value::variant("Mailbox", vec![Value::Int(id)]))
+        }
+
+        "close_mailbox" => {
+            // Release the mailbox queue. `send` and `receive` will report
+            // an error after the mailbox is closed.
+            let id = if let Ok(id) = extract_handle(&args[0], "Mailbox") {
+                id
+            } else {
+                extract_handle(&args[0], "Actor")?
+            };
+            let removed = MAILBOXES.with(|m| m.borrow_mut().remove(&id).is_some());
+            Ok(Value::Bool(removed))
         }
 
         "spawn_actor" => {
@@ -288,7 +304,10 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
 
         "self_id" => {
             let current = CURRENT_FIBER.with(|cf| *cf.borrow());
-            Ok(Value::variant("Actor", vec![Value::Int(current)]))
+            // `self_id` returns a Fiber handle so it composes with `await_fiber`
+            // and other fiber APIs. The main thread is fiber 0; spawned fibers
+            // and actors each get their own integer id.
+            Ok(Value::variant("Fiber", vec![Value::Int(current)]))
         }
 
         "channel" => {
@@ -339,6 +358,29 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                     Err(error("Channel receiver is disconnected"))
                 }
             })
+        }
+
+        "close_channel" => {
+            // Close either the sender or receiver side of a channel. The
+            // underlying queue is removed once both sides have been closed so
+            // memory is reclaimed even when callers forget to close one side.
+            let id = if let Ok(id) = extract_handle(&args[0], "Sender") {
+                id
+            } else {
+                extract_handle(&args[0], "Receiver")?
+            };
+            let removed = CHANNELS.with(|c| c.borrow_mut().remove(&id).is_some());
+            Ok(Value::Bool(removed))
+        }
+
+        "is_channel_closed" => {
+            let id = if let Ok(id) = extract_handle(&args[0], "Sender") {
+                id
+            } else {
+                extract_handle(&args[0], "Receiver")?
+            };
+            let exists = CHANNELS.with(|c| c.borrow().contains_key(&id));
+            Ok(Value::Bool(!exists))
         }
 
         _ => Err(error(format!("Unknown concurrency builtin '{name}'"))),

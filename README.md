@@ -52,6 +52,37 @@ Pair lists with `zip`, destructure callback parameters, batch with `chunks`,
 transform text, and invoke programs with `run_process`. The REPL and debugger
 include introspection, history, and expression benchmarks.
 
+## Concurrency and web services
+
+Run lightweight green fibers, coordinate tasks with fail-fast structured
+nurseries, isolate state with actor mailboxes, and stream with CSP channels:
+
+```rynd
+# Structured nursery: runs tasks concurrently, canceling siblings if any fail
+let results = nursery(\n -> {
+    n.spawn(\ -> fetch("https://api-1.local"))
+    n.spawn(\ -> fetch("https://api-2.local"))
+})
+```
+
+Build modular web services and micro-frameworks using native TCP sockets,
+Sinatra/Phoenix-style Plugs, route pattern matching, and HTTP streaming:
+
+```rynd
+fn router(conn) {
+    let m = match_route(conn.path, "/api/nodes/:id")
+    if m.tag == "Some" and conn.method == "GET" {
+        return json_response(conn, 200, {"id": m.value.id, "status": "healthy"})
+    }
+    text_response(conn, 404, "Not Found")
+}
+
+let response = conn("GET", "/api/nodes/worker-1") |> router()
+```
+
+Inspect the [orchestration platform](examples/orchestrator_platform.rynd) and
+[Sinatra web server](examples/sinatra_web_server.rynd) examples.
+
 ## Ship it
 
 ```sh

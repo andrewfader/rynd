@@ -77,7 +77,7 @@ for name, source, expected in cases:
         expected = "Sales: 3\nTotal cents: 7100\nCustomers at or above 2000 cents: Grace, Linus\n"
     vm = run([BIN, "run", rynd], input=input_text)
     trans = run([BIN, "compile", rynd, "-o", rs])
-    compiler = run(["rustc", "-O", rs, "-o", native]) if trans["status"] == 0 else None
+    compiler = run(["rustc", "-O", rs, "-o", native], timeout=60) if trans["status"] == 0 else None
     aot = run([native], input=input_text) if compiler and compiler["status"] == 0 else None
     parity = aot is not None and vm["status"] == aot["status"] and vm["stdout"] == aot["stdout"]
     if expected is None:

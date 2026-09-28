@@ -1,7 +1,17 @@
 use rynd::{RyndEngine, Value};
 
+#[path = "common/socket_lock.rs"]
+mod socket_lock;
+
+/// Acquire the shared socket-test lock so parallel test binaries don't race on
+/// ephemeral ports. Drop the guard at the end of the test to release it.
+fn locked() -> socket_lock::SocketLock {
+    socket_lock::acquire().expect("acquire shared socket test lock")
+}
+
 #[test]
 fn test_metaprogramming_dynamic_apply() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let sum_res = apply("sum", [[10, 20, 30]])
@@ -14,6 +24,7 @@ fn test_metaprogramming_dynamic_apply() {
 
 #[test]
 fn test_metaprogramming_call_method_on_map() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let account = {
@@ -38,6 +49,7 @@ fn test_metaprogramming_call_method_on_map() {
 
 #[test]
 fn test_map_metaprogramming_primitives() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let m1 = {"a": 1, "b": 2}
@@ -70,6 +82,7 @@ fn test_map_metaprogramming_primitives() {
 
 #[test]
 fn test_route_pattern_matching() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let m1 = match_route("/users/42", "/users/:id")
@@ -97,6 +110,7 @@ fn test_route_pattern_matching() {
 
 #[test]
 fn test_plug_pipeline_and_json_response() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         fn plug_logger(conn) {
@@ -152,6 +166,7 @@ fn test_plug_pipeline_and_json_response() {
 
 #[test]
 fn test_plug_mounted_engines_and_subapps() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         # Sub-app / Engine
@@ -225,6 +240,7 @@ fn test_plug_mounted_engines_and_subapps() {
 
 #[test]
 fn test_socket_streaming_http_chunks() {
+    let _guard = locked();
     let mut engine = RyndEngine::new();
     let code = r#"
         let server = tcp_listen("127.0.0.1:0")

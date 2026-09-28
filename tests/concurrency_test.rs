@@ -148,3 +148,103 @@ fn test_fiber_pipeline_workflow() {
         ])
     );
 }
+
+#[test]
+fn test_self_id_returns_fiber_handle() {
+    // `self_id` should return a Fiber(id) handle so it composes with the rest
+    // of the fiber API. On the main thread the id is 0.
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let id = self_id()
+        [id.tag, id.value]
+    "#;
+    let res = engine.eval(code).expect("Eval failed");
+    assert_eq!(
+        res,
+        Value::list(vec![Value::string("Fiber"), Value::Int(0),])
+    );
+}
+
+#[test]
+fn test_self_id_inside_spawned_fiber() {
+    // A spawned fiber sees its own id; the main thread continues to see 0.
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let f = spawn(\ -> self_id().value)
+        let child_id = await_fiber(f)
+        let main_id = self_id().value
+        [main_id, child_id]
+    "#;
+    let res = engine.eval(code).expect("Eval failed");
+    if let Value::List(items) = res {
+        assert_eq!(items[0], Value::Int(0)); // main thread
+        if let Value::Int(child) = items[1] {
+            assert!(child > 0, "spawned fiber should have a non-zero id");
+        } else {
+            panic!("expected int child id, got {:?}", items[1]);
+        }
+    } else {
+        panic!("expected list, got {res:?}");
+    }
+}
+
+#[test]
+fn test_close_channel_releases_queue() {
+    // Closing either side of a channel removes the underlying queue. After
+    // close, `is_channel_closed` reports true and `channel_recv` errors.
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let ch = channel()
+        let tx = ch[0]
+        let rx = ch[1]
+        channel_send(tx, "hello")
+        let before_close = is_channel_closed(rx)
+        let removed = close_channel(tx)
+        let after_close = is_channel_closed(rx)
+        [before_close, removed, after_close]
+    "#;
+    let res = engine.eval(code).expect("Eval failed");
+    assert_eq!(
+        res,
+        Value::list(vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+        ])
+    );
+}
+
+#[test]
+fn test_close_mailbox_releases_queue() {
+    // Manually created mailboxes can be closed explicitly; subsequent send or
+    // receive should fail because the queue is gone.
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let mb = create_mailbox()
+        send(mb, "queued")
+        let closed = close_mailbox(mb)
+        let outcome = attempt(\ -> receive(mb), [])
+        [closed, outcome.tag]
+    "#;
+    let res = engine.eval(code).expect("Eval failed");
+    assert_eq!(
+        res,
+        Value::list(vec![Value::Bool(true), Value::string("Err")])
+    );
+}
+
+#[test]
+fn test_await_fiber_twice_returns_cached_result() {
+    // A fiber can be awaited at most once. The first await executes the task,
+    // caches the result, and removes the fiber entry. A second await on the
+    // same handle must fail with "Invalid or expired Fiber handle".
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let f = spawn(\ -> 42)
+        let first = await_fiber(f)
+        let second = attempt(\ -> await_fiber(f), [])
+        [first, second.tag]
+    "#;
+    let res = engine.eval(code).expect("Eval failed");
+    assert_eq!(res, Value::list(vec![Value::Int(42), Value::string("Err")]));
+}
