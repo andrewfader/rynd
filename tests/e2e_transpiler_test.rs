@@ -871,3 +871,19 @@ fn destructured_function_and_lambda_parameters() {
         true,
     );
 }
+
+#[test]
+fn filtermap_verdicts_native_parity() {
+    verify(
+        "filtermap_verdicts",
+        r#"
+        fn route(len) { if len > 24 { Reject("too specific") } else { Accept(len * 2) } }
+        let kept = [8, 30, 24] |> filter_map(route)
+        let judged = [8, 30] |> filter(route)
+        let why = match route(32) { Accept(x) => x, Reject(reason) => reason }
+        [kept, judged, why, not Reject(1), Accept(nil) ?: "falsy"]
+    "#,
+        Some("[[16, 48], [8], too specific, true, Accept(nil)]\n"),
+        false,
+    );
+}

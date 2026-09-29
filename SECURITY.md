@@ -1,88 +1,56 @@
-# Security considerations
+# Security
 
-If you allow users to submit untrusted Rynd scripts to your application,
-treat the engine as a process that can read files, open sockets, fork
-processes, allocate memory, and recurse. Sandboxing is your responsibility,
-not the engine's.
+Rynd runs with the authority of the process that hosts it. A script can do what
+its builtins and your registered functions can do, so the question for
+untrusted code is which of those it gets.
 
-## What an untrusted script can do today
+## Capabilities
 
-The bytecode VM and the Rust transpiler share the host's process authority.
-A malicious or buggy script can:
+A `RyndEngine::new()` script can read and write files (`read_text`, `write_text`,
+`read_bytes`, `list_dir`, `mkdir_all`, ...), read stdin and environment
+variables, run programs with `run_process`, sleep, and open TCP listeners and
+connections. Generated native Rust has the same builtins.
 
-- **Crash the host** by exhausting memory with infinite recursion (the VM
-  bounds call depth at 256 and surfaces it as a runtime error, but the host
-  process still pays for stack growth before the limit trips). Long-running
-  scripts that build large lists, deeply nested maps, or huge strings can
-  also OOM the host.
-- **Loop forever** in a `while` expression. The interpreter has no execution
-  budget.
-- **Run a while loop that emits unbounded output** via `print`/`println`,
-  filling the host's stdout.
-- **Open TCP listeners or connections** (`tcp_listen`, `tcp_connect`,
-  `socket_*`). With `run_process` it can launch arbitrary subprocesses.
-  Disabling the `tcp` feature removes the network surface; `run_process`
-  is always available because it sits in the core scripting module.
-- **Read or write any path the host can read or write**, including through
-  `read_text`, `write_text`, `read_bytes`, `write_bytes`, `cwd`, `env`,
-  `list_dir`, `file_info`, `exists`, and `mkdir_all`. There is no
-  filesystem chroot.
-- **Execute arbitrary `rustc` during compilation** via the `transpiler`
-  feature (`rynd::RustTranspiler` + `rynd::build::cargo_module`). Compile
-  jobs spawned by `build::native` run with the host's filesystem access
-  and environment.
+`RyndEngine::sandboxed()` removes all of them
+(`rynd::vm::safety::HOST_ACCESS_BUILTINS` lists each one) and keeps the
+restriction across `reset()`. What remains is computation: collections, text,
+JSON, pattern matching, fibers, channels, and the host functions you register.
+`remove_global(name)` removes any other individual builtin.
 
-## Recommended mitigations
+Registered functions are the security boundary. A script can call exactly what
+you install; expose narrow operations (`lookup_price(sku)`) rather than broad
+ones (`query(sql)`).
 
-The host application must impose limits the engine does not:
+## Limits the engine enforces
 
-- **Validate length and source size** of submitted scripts before
-  compilation. A reasonable upper bound is the smallest program that solves
-  the user's problem plus a generous margin; reject anything larger.
-- **Compile and run untrusted scripts in a separate process** with a CPU
-  time limit, a memory cap, a writable scratch directory, a network
-  namespace you control, and a watchdog that reaps crashed children. The
-  VM does not isolate scripts from each other.
-- **Limit concurrent script execution** with a process-wide semaphore.
-  Even benign scripts that spawn green fibers or wait on channels can
-  consume memory indefinitely.
-- **Pre-register only the host functions the script needs.** A script
-  that calls `run_process` because you registered it can do anything
-  the host process can. If you only need to filter strings, don't expose
-  `run_process` or the TCP builtins. Disable the `tcp`, `concurrency`,
-  and `transpiler` cargo features and recompile the engine for the
-  untrusted-script deployment.
-- **Treat host callbacks as the security boundary.** Scripts only see
-  what you register. A filter that validates input against a regex
-  before forwarding is safer than a filter that hands the host's full
-  application state to the script.
+- **Call depth** is capped at `rynd::vm::safety::MAX_CALL_DEPTH` (256) in the
+  VM, generated Rust, and the JIT. Exceeding it is a runtime error, not a stack
+  overflow.
+- **Integer overflow**, division by zero, and modulo by zero are runtime errors
+  in every backend and build profile.
+- **Script errors are values** to the host: every failure is a `RyndError`, and
+  the engine stays usable after one.
+- **No `unsafe`** in the default build. The opt-in `jit` feature executes
+  Cranelift-generated machine code for integer/boolean functions that pass a
+  static type check; everything else stays in the bytecode VM.
 
-## What the engine does guarantee
+## Limits the host must enforce
 
-- **No file or network access without an explicit builtin call.** A pure
-  expression cannot reach the filesystem.
-- **Integer overflow is a runtime error** in both the VM and the
-  transpiler. There is no wrap-around arithmetic by default.
-- **Call depth is bounded at 256** by default. Exceeding it raises a
-  runtime error rather than overflowing the stack. To lower the limit
-  for untrusted scripts, fork the engine and instrument the depth check.
-- **Dynamic value checks** are exhaustive: every variant of `Value` is
-  matched, and tagged `Err(message)` from `attempt` is data, not a panic.
+The engine has no instruction budget and no memory quota. Recursion is bounded,
+but a script can still iterate over a huge `range`, build large collections, or
+wait forever on a channel. For untrusted input:
 
-## What the engine does not guarantee
+- Cap source size before compiling.
+- Run scripts in a separate process with CPU-time and memory limits
+  (`setrlimit`, cgroups, or a container) and kill it on timeout.
+- Use `sandboxed()` unless the script genuinely needs host access, and give
+  that process its own scratch directory and network policy when it does.
+- Catch panics at your host-function boundary; a panic inside a registered Rust
+  closure propagates to the caller like any Rust panic.
+- `rynd build` and `rynd::build::native` invoke `rustc` on generated code;
+  build untrusted scripts only inside the same sandbox.
 
-- **No memory ceiling per script.** A script that builds `[1, 2, 3, ...]`
-  one element at a time in a loop will OOM the host.
-- **No CPU budget per script.** `while true {}` runs forever.
-- **No filesystem or network isolation.** The engine has the same
-  authority as the host process.
-- **No panic recovery from host callbacks.** If a registered Rust closure
-  panics, the panic propagates to the host process.
+## Reporting
 
-## Reporting soundness issues
-
-The bytecode interpreter relies on unsafe-free Rust but generates machine
-code paths that share much of the runtime's invariants. Treat any soundness
-issue (segfault, undefined behavior, out-of-bounds memory access) as a
-high-priority bug. Please file an issue with a reproducer.
--
+Report crashes, panics reachable from script source, or memory-safety issues
+with a reproducer. Panics in the parser, compiler, or VM on any input are bugs.

@@ -21,6 +21,10 @@ pub trait Runtime {
     fn write(&mut self, text: &str) -> RyndResult<()>;
     fn get_global(&self, name: &str) -> RyndResult<Value>;
     fn set_global(&mut self, name: &str, value: Value);
+    /// Script function frames currently active, counted like the call-depth limit.
+    fn call_depth(&self) -> usize {
+        0
+    }
 }
 
 pub fn globals() -> HashMap<String, Value> {
@@ -82,6 +86,8 @@ pub fn globals() -> HashMap<String, Value> {
         ("Some", 1),
         ("Ok", 1),
         ("Err", 1),
+        ("Accept", 1),
+        ("Reject", 1),
         ("merge", 2),
         ("put", 3),
         ("get", 3),
@@ -93,25 +99,9 @@ pub fn globals() -> HashMap<String, Value> {
     .iter()
     .copied()
     .chain(super::scripting::BUILTINS.iter().copied())
+    .chain(super::sockets::BUILTINS.iter().copied())
+    .chain(super::concurrency::BUILTINS.iter().copied())
     {
-        globals.insert(
-            name.into(),
-            Value::Builtin {
-                name: name.into(),
-                arity,
-            },
-        );
-    }
-    for (name, arity) in super::sockets::BUILTINS.iter().copied() {
-        globals.insert(
-            name.into(),
-            Value::Builtin {
-                name: name.into(),
-                arity,
-            },
-        );
-    }
-    for (name, arity) in super::concurrency::BUILTINS.iter().copied() {
         globals.insert(
             name.into(),
             Value::Builtin {
@@ -474,7 +464,7 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 .map_err(|e| error(format!("read_stdin(): {e}")))?;
             Ok(Value::string(text))
         }
-        "Some" | "Ok" | "Err" => Ok(Value::variant(name, args.to_vec())),
+        "Some" | "Ok" | "Err" | "Accept" | "Reject" => Ok(Value::variant(name, args.to_vec())),
         "map" | "filter" => {
             let items = list(&args[0])?;
             let mut out = Vec::with_capacity(items.len());
@@ -569,12 +559,12 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
         }
         _ => {
             if super::sockets::BUILTINS.iter().any(|(b, _)| *b == name) {
-                return super::sockets::call(rt, name, args);
+                super::sockets::call(rt, name, args)
+            } else if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
+                super::concurrency::call(rt, name, args)
+            } else {
+                super::scripting::call(rt, name, args)
             }
-            if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
-                return super::concurrency::call(rt, name, args);
-            }
-            super::scripting::call(rt, name, args)
         }
     }
 }
@@ -647,8 +637,8 @@ impl Runtime for NativeRuntime {
         check_arity(callee, args.len())?;
         match callee {
             Value::Compiled { func, .. } => {
-                if self.depth >= 256 {
-                    return Err(error("Call depth limit exceeded (256)"));
+                if self.depth >= super::safety::MAX_CALL_DEPTH {
+                    return Err(super::safety::depth_error());
                 }
                 self.depth += 1;
                 let result = func(self, args, callee);
@@ -673,5 +663,8 @@ impl Runtime for NativeRuntime {
     }
     fn set_global(&mut self, name: &str, value: Value) {
         self.globals.insert(name.into(), value);
+    }
+    fn call_depth(&self) -> usize {
+        self.depth
     }
 }

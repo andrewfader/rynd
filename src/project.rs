@@ -125,7 +125,8 @@ you add. Update the snapshot deliberately when upgrading Rynd.
         path,
         ".rynd/compiler/Cargo.toml",
         &format!(
-            "\n[package]\nname = \"rynd\"\nversion = {:?}\nedition = \"2024\"\nautobins = false\n\n[features]\ndefault = [\"transpiler\", \"project\"]\ntranspiler = []\nproject = [\"transpiler\"]\n\n[dependencies]\nariadne = \"0.6\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+            // The snapshot omits the optional JIT; declare its cfg so the gate stays lint-clean.
+            "[package]\nname = \"rynd\"\nversion = {:?}\nedition = \"2024\"\nautobins = false\n[lib]\npath = \"src/lib.rs\"\n[lints.rust]\nunexpected_cfgs = {{ level = \"warn\", check-cfg = ['cfg(feature, values(\"jit\"))'] }}\n",
             env!("CARGO_PKG_VERSION")
         ),
     )?;
@@ -205,6 +206,7 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/benchmark_stats.rs", include_str!("benchmark_stats.rs")),
     ("src/benchmarks.rs", include_str!("benchmarks.rs")),
     ("src/build.rs", include_str!("build.rs")),
+    ("src/cli.rs", include_str!("cli.rs")),
     ("src/debugger.rs", include_str!("debugger.rs")),
     ("src/error.rs", include_str!("error.rs")),
     ("src/host.rs", include_str!("host.rs")),

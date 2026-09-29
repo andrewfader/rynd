@@ -1,20 +1,21 @@
 pub mod benchmarks;
 pub mod build;
+pub mod cli;
 pub mod debugger;
 pub mod error;
 pub mod host;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod modules;
 pub mod project;
 pub mod source_tree;
 pub mod syntax;
 pub mod transpiler;
-pub mod vm;
-#[cfg(feature = "jit")]
-pub mod jit;
 pub mod verdict;
+pub mod vm;
 
 pub use error::{RyndError, RyndResult, Span};
-pub use host::{Registerable, Val};
+pub use host::{Context, FromValue, HostFn, IntoValue, Library, Registerable, Val};
 pub use source_tree::SourceTree;
 pub use transpiler::RustTranspiler;
 pub use verdict::Verdict;
@@ -33,66 +34,70 @@ use vm::compiler::Compiler;
 /// A reusable compiled entry point belonging to one engine session.
 #[derive(Clone, Debug)]
 pub struct CompiledScript {
-    pub(crate) entry: usize,
-    pub(crate) session: Rc<()>,
+    entry: usize,
+    session: Rc<()>,
 }
 
 impl CompiledScript {
-    pub fn entry(&self) -> Option<usize> {
-        Some(self.entry)
-    }
-    pub fn session_id(&self) -> *const () {
-        Rc::as_ptr(&self.session)
+    /// Index of the script's entry chunk in its engine.
+    pub fn entry(&self) -> usize {
+        self.entry
     }
 }
 
-/// A compiled `Package` is the hot-reload-friendly output of a script.
-/// Unlike [`CompiledScript`], a `Package` exposes `reload` so embedders
-/// can recompile a script in place without rebuilding the engine.
+/// A named, hot-reloadable script: keeps its source next to the compiled
+/// entry point so hosts can recompile it in place.
+///
+/// ```
+/// use rynd::{Package, RyndEngine, Value};
+///
+/// let mut engine = RyndEngine::new();
+/// let mut rules = Package::compile(&mut engine, "fn limit() { 10 }").unwrap();
+/// rules.run(&mut engine).unwrap();
+/// assert_eq!(engine.call("limit", &[]).unwrap(), Value::Int(10));
+///
+/// rules.reload(&mut engine, "fn limit() { 20 }").unwrap();
+/// assert_eq!(engine.call("limit", &[]).unwrap(), Value::Int(20));
+/// // A failed reload keeps the previous version.
+/// assert!(rules.reload(&mut engine, "fn limit( {").is_err());
+/// assert_eq!(rules.source(), "fn limit() { 20 }");
+/// ```
+#[derive(Clone, Debug)]
 pub struct Package {
     script: CompiledScript,
     source: String,
-    chunks_start: usize,
 }
 
 impl Package {
-    /// Compile a script into a Package bound to the engine's session.
+    /// Compile `source` into `engine` without running it.
     pub fn compile(engine: &mut RyndEngine, source: &str) -> RyndResult<Self> {
-        let chunks_before = engine.machine.chunks.len();
-        let script = engine.compile(source)?;
-        let chunks_start = chunks_before;
         Ok(Self {
-            script,
+            script: engine.compile(source)?,
             source: source.to_string(),
-            chunks_start,
         })
     }
 
-    /// Return the underlying compiled script handle.
-    pub fn entry(&self) -> Option<usize> {
-        Some(self.script.entry)
+    pub fn script(&self) -> &CompiledScript {
+        &self.script
     }
 
-    /// Run the package against an engine.
+    /// Run the package's top level against the engine it was compiled for.
     pub fn run(&self, engine: &mut RyndEngine) -> RyndResult<Value> {
         engine.run(&self.script)
     }
 
-    /// Hot-reload: re-compile a new source into the same Package. The
-    /// engine's prior state for this package is overwritten; the
-    /// engine's other compiled scripts are unaffected.
-    pub fn reload(&mut self, engine: &mut RyndEngine, source: &str) -> RyndResult<()> {
-        // Drop the old chunks by truncating the chunk list back to
-        // where this package started, then re-compile. Globals
-        // introduced by the previous source remain because reload
-        // rewrites the chunks, not the global table.
-        engine.machine.chunks.truncate(self.chunks_start);
-        // Reset globals set by the previous source: we don't track
-        // them per-package yet, so we keep them and let the new
-        // source redeclare if it wants.
-        self.script = engine.compile(source)?;
+    /// Recompile from new source and run its top level, so its definitions
+    /// replace the old ones. Values and closures created by earlier versions
+    /// stay valid; on failure the previous version remains installed.
+    pub fn reload(&mut self, engine: &mut RyndEngine, source: &str) -> RyndResult<Value> {
+        let script = engine.compile(source)?;
+        let saved = engine.machine.globals.clone();
+        let value = engine
+            .run(&script)
+            .inspect_err(|_| engine.machine.globals = saved)?;
+        self.script = script;
         self.source = source.to_string();
-        Ok(())
+        Ok(value)
     }
 
     pub fn source(&self) -> &str {
@@ -100,52 +105,59 @@ impl Package {
     }
 }
 
-/// A list of items being registered into a runtime. Embedders build a
-/// Library once and bind it to a Runtime to describe what the script
-/// can call.
-pub struct Library {
-    entries: std::collections::BTreeMap<String, Box<dyn std::any::Any + Send + Sync>>,
-}
-
-impl Library {
-    pub fn new() -> Self {
-        Self {
-            entries: std::collections::BTreeMap::new(),
-        }
-    }
-
-    /// Register a typed host function. The function shape must match
-    /// one of the [`Registerable`] impls in [`host`].
-    pub fn register<F>(&mut self, name: impl Into<String>, func: F)
-    where
-        F: 'static + Send + Sync + std::any::Any,
-    {
-        self.entries.insert(name.into(), Box::new(func));
-    }
-
-    pub fn names(&self) -> Vec<String> {
-        self.entries.keys().cloned().collect()
-    }
-}
-
-impl Default for Library {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A `ScriptRuntime` is a thin wrapper around [`RyndEngine`] for
-/// symmetry with Roto's API. It owns an engine and a [`Library`] of
-/// items to register when compiling.
+/// An engine bound to a [`Library`] of host items: the one-stop embedding
+/// entry point. Resetting the runtime reinstalls the library.
+///
+/// ```
+/// use rynd::{Library, ScriptRuntime, Value};
+///
+/// let mut lib = Library::new();
+/// lib.register("fee", |cents: i64| cents / 50);
+/// let mut runtime = ScriptRuntime::with_library(lib);
+/// let pkg = runtime.load("fn total(cents) { cents + fee(cents) }").unwrap();
+/// assert_eq!(runtime.call("total", &[Value::Int(1000)]).unwrap(), Value::Int(1020));
+/// assert_eq!(pkg.source(), "fn total(cents) { cents + fee(cents) }");
+/// ```
 pub struct ScriptRuntime {
     pub engine: RyndEngine,
+    library: Library,
 }
 
 impl ScriptRuntime {
     pub fn new() -> Self {
+        Self::with_library(Library::new())
+    }
+
+    pub fn with_library(library: Library) -> Self {
         Self {
-            engine: RyndEngine::new(),
+            engine: RyndEngine::with_library(&library),
+            library,
         }
+    }
+
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Compile and run `source`, returning a reloadable [`Package`].
+    pub fn load(&mut self, source: &str) -> RyndResult<Package> {
+        let package = Package::compile(&mut self.engine, source)?;
+        package.run(&mut self.engine)?;
+        Ok(package)
+    }
+
+    pub fn eval(&mut self, source: &str) -> RyndResult<Value> {
+        self.engine.eval(source)
+    }
+
+    pub fn call(&mut self, name: &str, args: &[Value]) -> RyndResult<Value> {
+        self.engine.call(name, args)
+    }
+
+    /// Discard script state and reinstall the library.
+    pub fn reset(&mut self) {
+        self.engine.reset();
+        self.library.install(&mut self.engine);
     }
 }
 
@@ -159,6 +171,9 @@ pub struct RyndEngine {
     machine: Machine,
     callbacks: HashMap<String, Value>,
     session: Rc<()>,
+    sandboxed: bool,
+    #[cfg(feature = "jit")]
+    jit: Option<jit::JitState>,
 }
 
 impl RyndEngine {
@@ -167,7 +182,48 @@ impl RyndEngine {
             machine: Machine::new(Vec::new()),
             callbacks: HashMap::new(),
             session: Rc::new(()),
+            sandboxed: false,
+            #[cfg(feature = "jit")]
+            jit: None,
         }
+    }
+
+    /// An engine without builtins that touch files, stdin, the environment,
+    /// processes, sleeping, or the network (see
+    /// [`vm::safety::HOST_ACCESS_BUILTINS`]). Scripts can still reach
+    /// whatever host functions you register. The restriction survives
+    /// [`RyndEngine::reset`].
+    ///
+    /// ```
+    /// let mut engine = rynd::RyndEngine::sandboxed();
+    /// assert!(engine.eval("read_text('/etc/passwd')").is_err());
+    /// assert_eq!(engine.eval("upper('ok')").unwrap().to_string(), "OK");
+    /// ```
+    pub fn sandboxed() -> Self {
+        let mut engine = Self::new();
+        engine.sandboxed = true;
+        engine.remove_host_access();
+        engine
+    }
+
+    fn remove_host_access(&mut self) {
+        for name in vm::safety::HOST_ACCESS_BUILTINS {
+            self.machine.globals.remove(*name);
+        }
+    }
+
+    /// Remove a global (builtin, host function, or script binding) so
+    /// scripts can no longer name it. Returns the removed value.
+    pub fn remove_global(&mut self, name: &str) -> Option<Value> {
+        self.callbacks.remove(name);
+        self.machine.globals.remove(name)
+    }
+
+    /// A fresh engine with `library` installed.
+    pub fn with_library(library: &Library) -> Self {
+        let mut engine = Self::new();
+        library.install(&mut engine);
+        engine
     }
 
     pub fn eval(&mut self, source: &str) -> RyndResult<Value> {
@@ -192,12 +248,28 @@ impl RyndEngine {
         self.run(&script)
     }
 
+    /// Compile `entry` from an in-memory [`SourceTree`], resolving its imports.
+    pub fn compile_tree(
+        &mut self,
+        tree: &SourceTree,
+        entry: impl AsRef<Path>,
+    ) -> RyndResult<CompiledScript> {
+        self.compile_program(&tree.compile(entry)?.program)
+    }
+
+    pub fn eval_tree(&mut self, tree: &SourceTree, entry: impl AsRef<Path>) -> RyndResult<Value> {
+        let script = self.compile_tree(tree, entry)?;
+        self.run(&script)
+    }
+
     fn compile_program(&mut self, program: &Program) -> RyndResult<CompiledScript> {
         let entry = self.machine.chunks.len();
         let compiler = Compiler::with_offset(entry);
         let chunks = compiler.compile(program)?;
 
         self.machine.chunks.extend(chunks);
+        #[cfg(feature = "jit")]
+        self.jit_program(entry, program);
         Ok(CompiledScript {
             entry,
             session: self.session.clone(),
@@ -254,6 +326,12 @@ impl RyndEngine {
         result
     }
 
+    /// Call a filter-map style function and split its result into a
+    /// [`Verdict`] and payload (see [`verdict`]).
+    pub fn filtermap(&mut self, name: &str, args: &[Value]) -> RyndResult<(Verdict, Value)> {
+        self.call(name, args).map(Verdict::split)
+    }
+
     /// Drain captured output, keeping capture enabled.
     pub fn take_output(&mut self) -> String {
         self.machine
@@ -268,6 +346,9 @@ impl RyndEngine {
         let capture = self.machine.output_buffer.is_some();
         self.machine = Machine::new(Vec::new());
         self.session = Rc::new(());
+        if self.sandboxed {
+            self.remove_host_access();
+        }
         self.machine.globals.extend(self.callbacks.clone());
         if capture {
             self.machine.enable_output_capture();
@@ -280,34 +361,34 @@ impl RyndEngine {
             .insert(name.into(), self.machine.globals[name].clone());
     }
 
-    /// Register a typed unary closure. Unlike the blanket `Registerable`
-    /// impls (which target fn pointers), this accepts any `'static` closure.
-    pub fn register_typed_fn1<T, F, R>(&mut self, name: &str, func: F)
-    where
-        F: 'static + Fn(T) -> R,
-        R: 'static + Into<Value>,
-        for<'a> T: TryFrom<&'a Value, Error = RyndError>,
-    {
-        self.register_closure(name, 1, move |args| {
-            let arg = T::try_from(&args[0])?;
-            Ok(func(arg).into())
-        });
+    /// Register a Rust function or closure with typed arguments and result
+    /// (see [`host`]). Survives [`RyndEngine::reset`].
+    pub fn register<Args, F: HostFn<Args>>(&mut self, name: &str, func: F) {
+        self.register_closure(name, F::ARITY, move |args| func.call(args));
     }
 
-    /// Register a typed binary closure. Unlike the blanket `Registerable`
-    /// impls (which target fn pointers), this accepts any `'static` closure.
-    pub fn register_typed_fn2<A, B, F, R>(&mut self, name: &str, func: F)
+    /// Install host data whose fields become script globals.
+    pub fn install(&mut self, context: &impl Context) -> RyndResult<()> {
+        context.install(self)
+    }
+
+    /// Register a typed one-argument closure; same as [`RyndEngine::register`].
+    pub fn register_typed_fn1<A, R>(&mut self, name: &str, func: impl Fn(A) -> R + 'static)
     where
-        F: 'static + Fn(A, B) -> R,
-        R: 'static + Into<Value>,
-        for<'a> A: TryFrom<&'a Value, Error = RyndError>,
-        for<'b> B: TryFrom<&'b Value, Error = RyndError>,
+        A: FromValue + 'static,
+        R: IntoValue + 'static,
     {
-        self.register_closure(name, 2, move |args| {
-            let x = A::try_from(&args[0])?;
-            let y = B::try_from(&args[1])?;
-            Ok(func(x, y).into())
-        });
+        self.register(name, func);
+    }
+
+    /// Register a typed two-argument closure; same as [`RyndEngine::register`].
+    pub fn register_typed_fn2<A, B, R>(&mut self, name: &str, func: impl Fn(A, B) -> R + 'static)
+    where
+        A: FromValue + 'static,
+        B: FromValue + 'static,
+        R: IntoValue + 'static,
+    {
+        self.register(name, func);
     }
 
     /// Register a callback that owns application state (use RefCell for mutation).
@@ -354,9 +435,8 @@ pub fn transpile_file(path: impl AsRef<Path>) -> RyndResult<String> {
 }
 
 /// Cheap syntactic check: returns true when `source` parses cleanly and
-/// contains a top-level `fn main` declaration. Mirrors Roto's
-/// `has_main_function` for embedders that want to gate script invocation
-/// without paying for bytecode compilation.
+/// contains a top-level `fn main` declaration. Lets embedders gate script
+/// invocation without paying for bytecode compilation.
 pub fn has_main_function(source: &str) -> bool {
     let Ok(tokens) = Lexer::new(source).tokenize() else {
         return false;
@@ -370,13 +450,6 @@ pub fn has_main_function(source: &str) -> bool {
             syntax::ast::Stmt::Function { name, .. } if name == "main"
         )
     })
-}
-
-/// Wrap a `Command` so it runs the embedded `rynd` binary with the same
-/// behavior as the package's `main`. Useful for embedding the REPL or
-/// test scaffolding inside a host application.
-pub fn cli(command: std::process::Command) -> std::process::Command {
-    command
 }
 
 /// Inspection helpers for scripts: pretty-print the parsed AST or the

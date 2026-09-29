@@ -84,7 +84,7 @@ impl Value {
             Value::Map(m) => !m.is_empty(),
             Value::Tuple(_) => true,
             Value::Variant { name, values } => {
-                if name == "None" || name == "Err" {
+                if matches!(name.as_str(), "None" | "Err" | "Reject") {
                     false
                 } else if name == "Some" && values.len() == 1 {
                     values[0].is_truthy()

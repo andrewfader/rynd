@@ -470,3 +470,14 @@ fn streaming_lines_transform_filter_number_and_report_errors() {
     );
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(not(feature = "jit"))]
+#[test]
+fn jit_flag_explains_how_to_enable_it() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rynd"))
+        .args(["eval", "--jit", "1"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--features jit"));
+}

@@ -13,15 +13,48 @@ use std::{
     rc::Rc,
 };
 
+#[derive(Clone, Debug)]
 pub struct ModuleBundle {
     pub program: Program,
     pub files: Vec<PathBuf>,
     pub exports: Vec<String>,
 }
 
+/// Where module source text comes from: the filesystem or an in-memory tree.
+pub trait SourceProvider {
+    /// A stable identity for `path`, so each module is loaded exactly once.
+    fn canonical(&self, path: &Path) -> RyndResult<PathBuf>;
+    fn read(&self, canonical: &Path) -> RyndResult<String>;
+}
+
+struct FileSystem;
+
+impl SourceProvider for FileSystem {
+    fn canonical(&self, path: &Path) -> RyndResult<PathBuf> {
+        path.canonicalize()
+            .map_err(|e| RyndError::IoError(format!("{}: {e}", path.display())))
+    }
+    fn read(&self, canonical: &Path) -> RyndResult<String> {
+        std::fs::read_to_string(canonical)
+            .map_err(|e| RyndError::IoError(format!("{}: {e}", canonical.display())))
+    }
+}
+
 pub fn load(path: impl AsRef<Path>) -> RyndResult<ModuleBundle> {
-    let mut loader = Loader::default();
-    loader.module(path.as_ref(), true)?;
+    load_from(&FileSystem, path.as_ref())
+}
+
+/// Resolve `entry` and its imports through `sources`.
+pub fn load_from(sources: &dyn SourceProvider, entry: &Path) -> RyndResult<ModuleBundle> {
+    let mut loader = Loader {
+        sources,
+        loaded: HashMap::new(),
+        active: Vec::new(),
+        files: Vec::new(),
+        statements: Vec::new(),
+        exports: Vec::new(),
+    };
+    loader.module(entry, true)?;
     Ok(ModuleBundle {
         program: Program {
             statements: loader.statements,
@@ -31,8 +64,8 @@ pub fn load(path: impl AsRef<Path>) -> RyndResult<ModuleBundle> {
     })
 }
 
-#[derive(Default)]
-struct Loader {
+struct Loader<'a> {
+    sources: &'a dyn SourceProvider,
     loaded: HashMap<PathBuf, String>,
     active: Vec<PathBuf>,
     files: Vec<PathBuf>,
@@ -66,11 +99,9 @@ fn declaration(stmt: &Stmt) -> Vec<String> {
     }
 }
 
-impl Loader {
+impl Loader<'_> {
     fn module(&mut self, path: &Path, root: bool) -> RyndResult<String> {
-        let path = path
-            .canonicalize()
-            .map_err(|e| RyndError::IoError(format!("{}: {e}", path.display())))?;
+        let path = self.sources.canonical(path)?;
         if self.active.contains(&path) {
             let chain = self
                 .active
@@ -94,8 +125,7 @@ impl Loader {
         let namespace = format!("@module:{}", path.display());
         self.files.push(path.clone());
         self.active.push(path.clone());
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| RyndError::IoError(format!("{}: {e}", path.display())))?;
+        let source = self.sources.read(&path)?;
         let file: Rc<str> = path.to_string_lossy().as_ref().into();
         let mut tokens = Lexer::new(&source)
             .tokenize()

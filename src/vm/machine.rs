@@ -1,5 +1,6 @@
 use super::opcode::{Chunk, OpCode};
 use super::runtime::{self, Runtime, error};
+use super::safety::MAX_CALL_DEPTH;
 use super::value::Value;
 use crate::error::{RyndError, RyndResult, Span};
 use std::collections::{BTreeMap, HashMap};
@@ -314,15 +315,19 @@ impl Machine {
         }
         Ok(())
     }
-    #[inline(always)]
-    fn push_frame(&mut self, callee: Value, args: Vec<Value>) -> RyndResult<()> {
+    /// Active function frames, excluding the top-level entry frame.
+    fn function_depth(&self) -> usize {
         let entry_frame = usize::from(
             self.frames
                 .first()
                 .is_some_and(|frame| matches!(frame.callee, Value::Nil)),
         );
-        if self.frames.len().saturating_sub(entry_frame) >= 256 {
-            return Err(error("Call depth limit exceeded (256)"));
+        self.frames.len().saturating_sub(entry_frame)
+    }
+    #[inline(always)]
+    fn push_frame(&mut self, callee: Value, args: Vec<Value>) -> RyndResult<()> {
+        if self.function_depth() >= MAX_CALL_DEPTH {
+            return Err(super::safety::depth_error());
         }
         let chunk_index = match &callee {
             Value::Closure { chunk_index, .. } | Value::Function { chunk_index, .. } => {
@@ -408,5 +413,8 @@ impl Runtime for Machine {
     }
     fn set_global(&mut self, name: &str, value: Value) {
         self.globals.insert(name.into(), value);
+    }
+    fn call_depth(&self) -> usize {
+        self.function_depth()
     }
 }

@@ -1,14 +1,43 @@
-//! Safety knobs documented in `SECURITY.md`.
-//!
-//! These constants let embedders reason about the engine's resource limits
-//! without scraping the source. Changing them here is intentionally coupled
-//! with the matching checks in [`crate::vm::machine`] and [`crate::vm::runtime`];
-//! the constants below must match those checks exactly.
+//! Resource limits enforced by every Rynd backend (see `SECURITY.md`).
 
-/// Maximum call-stack depth before the interpreter raises a runtime error.
-///
-/// Recursion deeper than this returns `RuntimeError("Call depth limit exceeded ...")`
-/// instead of overflowing the stack. Embedders running untrusted scripts
-/// can fork the engine and patch the depth check, but the constants below
-/// describe the default behavior.
+/// Maximum script call depth. The bytecode VM, generated native Rust, and the
+/// optional JIT all raise a runtime error instead of overflowing the stack.
 pub const MAX_CALL_DEPTH: usize = 256;
+
+/// The error every backend reports when [`MAX_CALL_DEPTH`] is exceeded.
+pub fn depth_error() -> crate::error::RyndError {
+    super::runtime::error(format!("Call depth limit exceeded ({MAX_CALL_DEPTH})"))
+}
+
+/// Builtins that reach outside the engine: files, stdin, environment,
+/// processes, sleeping, and TCP. [`crate::RyndEngine::sandboxed`] removes them.
+pub const HOST_ACCESS_BUILTINS: &[&str] = &[
+    "read_text",
+    "read_stdin",
+    "read_lines",
+    "cat",
+    "write_text",
+    "append_text",
+    "read_bytes",
+    "write_bytes",
+    "cwd",
+    "env",
+    "list_dir",
+    "file_info",
+    "exists",
+    "mkdir_all",
+    "sleep_ms",
+    "run_process",
+    "tcp_listen",
+    "tcp_accept",
+    "tcp_connect",
+    "tcp_local_addr",
+    "socket_read",
+    "socket_read_bytes",
+    "socket_write",
+    "socket_close",
+    "socket_set_nonblocking",
+    "socket_write_http_chunk",
+    "socket_finish_http_chunks",
+    "socket_read_chunk",
+];

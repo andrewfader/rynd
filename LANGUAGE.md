@@ -50,7 +50,7 @@ support field introspection: `.tag` (or `.name`) returns the variant's name, and
 `.value` accesses its payload (yielding nil for payloadless variants like `None`).
 
 Truthiness is intentionally the existing Rynd/Groovy-like rule: nil, false, zero,
-NaN, empty strings/lists/maps, `None`, and `Err` are falsey; `Some(x)` follows x.
+NaN, empty strings/lists/maps, `None`, `Err`, and `Reject` are falsey; `Some(x)` follows x.
 This differs from Ruby and Elixir, where zero and empty collections are truthy.
 Use explicit comparisons when portability matters.
 
@@ -91,7 +91,7 @@ Explicit `return` is valid inside functions. Ending the final expression with a
 semicolon makes a block return nil.
 
 Patterns support literals, `_`, variables, nested tuples/lists, and tagged
-`Some`, `None`, `Ok`, `Err`. Match guards run after matching and binding. Arm
+variants such as `Some`, `None`, `Ok`, `Err`, `Accept`, and `Reject`. Match guards run after matching and binding. Arm
 bindings remain local. Unmatched `match` yields nil; a failed `let` pattern is an
 error. Integer overflow and zero division/remainder are errors in every build
 profile. Floats follow IEEE arithmetic; mixed comparisons preserve integer
@@ -125,25 +125,60 @@ file-mode scripts keep their ordinary expression execution behavior.
 ## Rust interoperability and deployment
 
 Rynd code and Rust code share `rynd::Value` and `RyndResult` within a Cargo project.
-Rust callbacks are registered with explicit arity. `register_fn` accepts function
-pointers; `register_closure` accepts owned closures and captured application state.
-A Rust adapter validates/unpacks values, calls any ordinary Rust crate API, and
-returns values or errors. Rust consumers call compiled Rynd exports directly
-through the generated library API. Integration tests exercise both directions
-and an additional Rust crate dependency.
-
-Rust adapters can use `Value::from` for `i64`, `f64`, `bool`, `String`, `&str`,
-`Vec<T>`, and `BTreeMap<String, T>` where T converts into `Value`. Checked
-`TryFrom<&Value>` and `TryFrom<Value>` conversions extract `i64`, `f64`, `bool`,
-and `String`; `TryFrom<&Value>` also borrows `&str` without copying. Scalar
-conversions require the matching variant and return `RyndError` on mismatches.
-Floats preserve their bits, including non-finite values.
+Register ordinary Rust functions and closures (0–8 arguments) with
+`engine.register(name, f)`; arguments convert through `FromValue` and results
+through `IntoValue`, so type mismatches become script errors, not panics.
+Supported types: `Value`, `bool`, `String`, `i64` and every other integer type
+(range-checked), `f64` (ints widen), `Vec<T>`, `Option<T>` (`Some`/`None`,
+`nil` reads as `None`), `BTreeMap`/`HashMap<String, T>`, tuples up to 4, `()`,
+and `RyndResult<T>` returns, whose `Err` becomes a recoverable script error.
+`register_closure(name, arity, f)` and `register_fn` remain for raw `&[Value]`
+adapters. Rust consumers call compiled Rynd exports directly through the
+generated library API.
 
 ```rust
-engine.register_closure("positive", 1, |args| {
-    Ok(Value::from(i64::try_from(&args[0])? > 0))
-});
+engine.register("clamp", |x: i64, lo: i64, hi: i64| x.clamp(lo, hi));
+rynd::register!(engine, parse_sku, price_of); // registered under their Rust names
+
+rynd::record! {
+    #[derive(Clone)]
+    pub struct Order { pub id: i64, pub total: f64, pub note: Option<String> }
+}
+engine.register("discount", |mut o: Order| { o.total *= 0.9; o }); // maps in, maps out
+engine.install(&order)?; // fields become globals: `id`, `total`, `note`
 ```
+
+`record!` is a dependency-free derive: it defines the struct and its
+map conversions, with field-qualified errors (`Order.total: Expected float`).
+Nested records, lists of records, and `Option` fields work.
+
+Embedding building blocks:
+
+- `Library` bundles functions and constants; `RyndEngine::with_library(&lib)`
+  or `ScriptRuntime::with_library(lib)` installs it (again after `reset`).
+- `Package` holds a script's source and compiled entry; `reload(engine, src)`
+  swaps definitions atomically: a compile or top-level runtime error keeps
+  the previous version.
+- `SourceTree` is an in-memory file tree whose `import`s resolve like files on
+  disk: `engine.eval_tree(&tree, "main.rynd")`.
+- Filter-map scripts return `Accept(value)` or `Reject(value)`;
+  `engine.filtermap(name, args)` yields `(Verdict, payload)`. `Reject` is falsey
+  and `filter_map` keeps accepted payloads.
+- `RyndEngine::sandboxed()` drops file, process, environment, and network
+  builtins; see [SECURITY.md](SECURITY.md).
+- `rynd::cli::main_with(|engine| ...)` ships the whole `rynd` CLI (run, eval,
+  lines, repl, debug) from your binary with your functions preinstalled.
+- `rynd::tools::print_ast` / `print_bytecode` and `has_main_function` inspect
+  sources without running them.
+- With the opt-in `jit` cargo feature, `engine.enable_jit()` (or
+  `rynd run --jit`) compiles integer/boolean functions that pass a static type
+  check to machine code with Cranelift. Calls with other argument types, and
+  every other function, run on the VM; errors, spans, and the call-depth limit
+  are identical. `jit_functions()` lists what was compiled; see `src/jit.rs`.
+
+Checked `TryFrom<&Value>` conversions also extract `i64`, `f64`, `bool`,
+`String`, and borrowed `&str`; `Value::from` builds values from Rust data.
+Floats preserve their bits, including non-finite values.
 
 Adapters provide an explicit dynamic ABI. Implement strongly typed, concurrent,
 asynchronous or performance-critical components in Rust adapters. A Cargo
@@ -160,7 +195,8 @@ lockfiles/profiles govern dependencies and release builds.
 Collections and input helpers materialize in memory. Values use `Rc`; create an
 independent runtime per thread or convert values to Rust data for transfer.
 Script call depth is bounded at 256. Scripts and native adapters execute with
-normal process authority. Use Rynd for trusted application logic.
+normal process authority; `RyndEngine::sandboxed()` removes host-access builtins
+for less-trusted scripts (see [SECURITY.md](SECURITY.md)).
 
 See [README.md](README.md) for executable workflows and verification, and
 [BENCHMARKS.md](BENCHMARKS.md) for measured performance.
@@ -186,7 +222,8 @@ list/tuple membership, or map-key presence. Invalid conversions return errors.
 `read_text(path)` and `read_stdin()` read all UTF-8 text from a file or stdin.
 `to_string(value)` uses Rynd display formatting; `print(value)` and
 `println(value)` write it. `args` contains script argument strings. `Some(x)`,
-`None`, `Ok(x)`, and `Err(x)` construct tagged values for pattern matching.
+`None`, `Ok(x)`, `Err(x)`, `Accept(x)`, and `Reject(x)` construct tagged values
+for pattern matching.
 
 ## JSON and collection pipelines
 
@@ -222,7 +259,7 @@ All return new values and preserve their inputs.
 | `zip(xs, ys)` | Pairs through the shorter input's length. |
 | `any(xs, predicate)`, `all(xs, predicate)` | Short-circuit using truthiness. Empty input returns false / true respectively. |
 | `find(xs, predicate)` | First matching item as `Some(value)`, or `None`; short-circuits. |
-| `filter_map(xs, f)` | One pass; keeps the payload of `Some(value)`, skips `None`. Preserves falsey payloads such as zero and nil. |
+| `filter_map(xs, f)` | One pass; keeps the payload of `Some(value)`/`Accept(value)`, skips `None`/`Reject(_)`. Preserves falsey payloads such as zero and nil. |
 | `flat_map(xs, f)` | Concatenates the lists returned by f, in input order. |
 
 These operations use eager lists. `find`, `any`, and `all` avoid scanning the tail

@@ -38,7 +38,8 @@ printf '[3,1,2]' | rynd eval 'read_stdin() |> parse_json() |> sort() |> to_json(
 Sort, group, search, and transform collections. Recover with `attempt` and
 `Ok`/`Err`. Try the [JSON report](examples/json_report.rynd) on real records.
 
-The toolchain uses Rust's standard library. The dependency tree is a stump.
+The toolchain uses Rust's standard library. The dependency tree is a stump
+(the opt-in `jit` feature grows a Cranelift branch).
 
 ## Work with records
 
@@ -118,9 +119,20 @@ engine.set_global("prices", Value::list(vec![Value::Int(100), Value::Int(250)]))
 assert_eq!(engine.eval("prices |> sum()").unwrap(), Value::Int(350));
 ```
 
-Register Rust callbacks, call script functions, or compile once and run repeatedly.
-Use one engine per thread for trusted scripts. See the
-[embedded rules example](examples/embedded_rules.rs) for host state and callbacks.
+Rust functions register as they are; conversions are inferred from the signature:
+
+```rust
+engine.register("clamp", |x: i64, lo: i64, hi: i64| x.clamp(lo, hi));
+rynd::record! { pub struct Order { pub id: i64, pub total: f64 } } // derive, no proc-macro crate
+```
+
+Bundle host APIs in a `Library`, hot-reload rules with `Package::reload`, resolve
+imports from an in-memory `SourceTree`, return `Accept(x)`/`Reject(x)` from
+filter-map scripts, and hand less-trusted code a `RyndEngine::sandboxed()`.
+`rynd::cli::main_with(|engine| ...)` ships the whole CLI with your functions
+built in. Need integer hot loops at machine speed? `--features jit` and
+`engine.enable_jit()`: Cranelift compiles what it can prove, the VM runs the rest.
+See the [embedded rules example](examples/embedded_rules.rs).
 
 ## Documentation
 

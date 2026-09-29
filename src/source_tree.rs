@@ -1,21 +1,24 @@
-//! In-memory multi-file source trees.
+//! In-memory multi-file sources.
 //!
-//! [`SourceTree`] holds a map of named source files and a `compile`
-//! entry point that lexes+parses each file independently. It is the
-//! minimal counterpart to Roto's `FileTree` for embedders that want to
-//! hand the engine a playground, a REPL session, or a test fixture
-//! without touching the filesystem.
+//! [`SourceTree`] maps relative paths to source text and resolves `import`
+//! statements between them exactly like files on disk, without touching the
+//! filesystem. Use it for playgrounds, sandboxes, REPL sessions, generated
+//! code, and test fixtures.
 //!
-//! The tree is intentionally simple: imports between files are not
-//! resolved, and there is no on-disk canonicalization. Use
-//! [`crate::modules::load`] when you need full module graph semantics.
-use crate::error::RyndResult;
-use crate::modules::ModuleBundle;
-use crate::syntax::ast::Program;
-use crate::syntax::lexer::Lexer;
-use crate::syntax::parser::Parser;
+//! ```
+//! use rynd::{RyndEngine, SourceTree, Value};
+//!
+//! let mut tree = SourceTree::new();
+//! tree.add("lib/tax.rynd", "pub fn with_tax(cents) { cents * 108 / 100 }");
+//! tree.add("main.rynd", "import \"lib/tax.rynd\" as tax\ntax.with_tax(1000)");
+//!
+//! let mut engine = RyndEngine::new();
+//! assert_eq!(engine.eval_tree(&tree, "main.rynd").unwrap(), Value::Int(1080));
+//! ```
+use crate::error::{RyndError, RyndResult};
+use crate::modules::{self, ModuleBundle, SourceProvider};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// An ordered collection of named source files keyed by relative path.
 #[derive(Clone, Debug, Default)]
@@ -28,10 +31,13 @@ impl SourceTree {
         Self::default()
     }
 
-    /// Add or replace a file. Paths are stored as given; use forward
-    /// slashes for cross-platform consistency.
-    pub fn add(&mut self, path: impl Into<PathBuf>, source: impl Into<String>) {
-        self.files.insert(path.into(), source.into());
+    /// Add or replace a file. `a/./b.rynd` and `a/c/../b.rynd` name the same file.
+    pub fn add(&mut self, path: impl AsRef<Path>, source: impl Into<String>) {
+        self.files.insert(normalize(path.as_ref()), source.into());
+    }
+
+    pub fn remove(&mut self, path: impl AsRef<Path>) -> Option<String> {
+        self.files.remove(&normalize(path.as_ref()))
     }
 
     pub fn len(&self) -> usize {
@@ -43,53 +49,57 @@ impl SourceTree {
     }
 
     pub fn contains(&self, path: impl AsRef<Path>) -> bool {
-        self.files.contains_key(path.as_ref())
+        self.files.contains_key(&normalize(path.as_ref()))
     }
 
     pub fn get(&self, path: impl AsRef<Path>) -> Option<&str> {
-        self.files.get(path.as_ref()).map(String::as_str)
+        self.files
+            .get(&normalize(path.as_ref()))
+            .map(String::as_str)
     }
 
     pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
         self.files.keys()
     }
 
-    /// Lex+parse the entry-point file. Each sibling file is lexed+parsed
-    /// so its errors are caught early, but only the entry point's program
-    /// is returned. The bundle's `files` list enumerates every file in
-    /// the tree in sorted path order.
+    /// Resolve `entry` and everything it imports into one program. The bundle
+    /// lists the files actually loaded and the entry's public exports.
     pub fn compile(&self, entry: impl AsRef<Path>) -> RyndResult<ModuleBundle> {
-        let entry_path = entry.as_ref().to_path_buf();
-        let entry_source = self
-            .files
-            .get(&entry_path)
-            .ok_or_else(|| crate::RyndError::IoError(format!(
-                "entry file not in tree: {}",
-                entry_path.display()
-            )))?;
-        // Lex+parse every file up front; surface sibling errors before
-        // returning the entry's program.
-        for (path, source) in &self.files {
-            let mut tokens = Lexer::new(source).tokenize()?;
-            for token in &mut tokens {
-                token.span.file = Some(path.to_string_lossy().as_ref().into());
-            }
-            Parser::new(tokens).parse().map_err(|e| {
-                e.with_file(path.to_string_lossy().as_ref().to_string())
-            })?;
+        modules::load_from(self, entry.as_ref())
+    }
+}
+
+impl SourceProvider for SourceTree {
+    fn canonical(&self, path: &Path) -> RyndResult<PathBuf> {
+        let path = normalize(path);
+        if self.files.contains_key(&path) {
+            Ok(path)
+        } else {
+            Err(RyndError::IoError(format!(
+                "{}: not found in source tree",
+                path.display()
+            )))
         }
-        let mut tokens = Lexer::new(entry_source).tokenize()?;
-        for token in &mut tokens {
-            token.span.file = Some(entry_path.to_string_lossy().as_ref().into());
-        }
-        let program = Parser::new(tokens).parse()?;
-        let files = self.files.keys().cloned().collect();
-        Ok(ModuleBundle {
-            program: Program {
-                statements: program.statements,
-            },
-            files,
-            exports: Vec::new(),
+    }
+
+    fn read(&self, canonical: &Path) -> RyndResult<String> {
+        self.files.get(canonical).cloned().ok_or_else(|| {
+            RyndError::IoError(format!("{}: not found in source tree", canonical.display()))
         })
     }
+}
+
+/// Lexically resolve `.` and `..` so tree paths never depend on a real directory.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
 }

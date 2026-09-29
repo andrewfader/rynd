@@ -258,13 +258,17 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                     out.extend_from_slice(list(&value)?);
                 } else {
                     match value {
-                        Value::Variant { name, values } if name == "Some" && values.len() == 1 => {
+                        Value::Variant { name, values }
+                            if matches!(name.as_str(), "Some" | "Accept") && values.len() == 1 =>
+                        {
                             out.push(values[0].clone())
                         }
-                        Value::Variant { name, values } if name == "None" && values.is_empty() => {}
+                        Value::Variant { name, values }
+                            if (name == "None" && values.is_empty())
+                                || (name == "Reject" && values.len() == 1) => {}
                         _ => {
                             return Err(error(
-                                "filter_map() callback must return Some(value) or None",
+                                "filter_map() callback must return Some(value), None, Accept(value), or Reject(value)",
                             ));
                         }
                     }

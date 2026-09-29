@@ -11,15 +11,15 @@ keywords = ["language", "scripting", "embedded", "vm", "transpiler"]
 categories = ["development-tools", "parser-implementations"]
 
 [features]
-# Cranelift IR generation, verification, and interpreter execution. Builds
-# real Cranelift IR for tiny Rynd functions, verifies it, and runs the
-# Cranelift interpreter to produce the answer. Opt-in because it pulls
-# in a Cranelift dependency tree.
+# Opt-in native JIT: compiles statically int/bool-typed Rynd functions to
+# machine code with Cranelift (see src/jit.rs). Default builds have zero
+# dependencies; this feature pulls in the Cranelift crates below.
 jit = [
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",
-    "dep:cranelift-interpreter",
-    "dep:target-lexicon",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
 ]
 
 [dependencies]
@@ -46,10 +46,14 @@ optional = true
 version = "0.136"
 optional = true
 
-[dependencies.cranelift-interpreter]
+[dependencies.cranelift-jit]
 version = "0.136"
 optional = true
 
-[dependencies.target-lexicon]
-version = "0.13"
+[dependencies.cranelift-module]
+version = "0.136"
+optional = true
+
+[dependencies.cranelift-native]
+version = "0.136"
 optional = true

@@ -42,6 +42,8 @@ impl RustTranspiler {
         out.push_str(include_str!("../vm/collections.rs"));
         out.push_str("\n} pub mod sockets {\n");
         out.push_str(include_str!("../vm/sockets.rs"));
+        out.push_str("\n} pub mod safety {\n");
+        out.push_str(include_str!("../vm/safety.rs"));
         out.push_str("\n} pub mod concurrency {\n");
         out.push_str(include_str!("../vm/concurrency.rs"));
         out.push_str("\n}}\n");

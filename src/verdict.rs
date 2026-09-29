@@ -1,11 +1,25 @@
-//! `Verdict` enum + `filter` builtin for filtermap-style scripts.
+//! Filter-map verdicts: a script decides whether to accept or reject an input
+//! and may transform it on the way through.
 //!
-//! In Roto, a `filtermap` block produces a [`Verdict::Accept`] or
-//! [`Verdict::Reject`] value. Rynd ships the same enum and a `filter`
-//! builtin so embedders can write the equivalent:
+//! Scripts return `Accept(value)` or `Reject(value)`; any other value is judged
+//! by truthiness and passed through unchanged. `Reject` is falsey, so verdict
+//! functions also work with `filter`, and `filter_map` keeps accepted payloads.
 //!
-//! ```ignore
-//! filter(x)   // -> Verdict::Accept if x is non-zero/non-nil, else Reject
+//! ```
+//! use rynd::{RyndEngine, Value, Verdict};
+//!
+//! let mut engine = RyndEngine::new();
+//! engine.eval(r#"
+//!     fn route(prefix) {
+//!         if prefix == "0.0.0.0/0" { Reject("default route") } else { Accept(upper(prefix)) }
+//!     }
+//! "#).unwrap();
+//!
+//! let (verdict, value) = engine.filtermap("route", &[Value::from("10.0.0.0/8")]).unwrap();
+//! assert_eq!(verdict, Verdict::Accept);
+//! assert_eq!(value, Value::from("10.0.0.0/8"));
+//! let (verdict, _) = engine.filtermap("route", &[Value::from("0.0.0.0/0")]).unwrap();
+//! assert_eq!(verdict, Verdict::Reject);
 //! ```
 use crate::vm::value::Value;
 use std::fmt;
@@ -17,46 +31,38 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// Judge a script result: `Accept(_)`/`Reject(_)` decide explicitly,
+    /// anything else accepts when truthy.
     pub fn from_value(value: &Value) -> Self {
+        Self::split(value.clone()).0
+    }
+
+    /// Split a script result into its verdict and payload. `Accept(x)` and
+    /// `Reject(x)` yield `x`; other values are their own payload.
+    pub fn split(value: Value) -> (Self, Value) {
         match value {
-            Value::Nil => Self::Reject,
-            Value::Int(n) => {
-                if *n != 0 {
-                    Self::Accept
-                } else {
-                    Self::Reject
-                }
+            Value::Variant { name, values } if values.len() == 1 && name == "Accept" => {
+                (Self::Accept, values[0].clone())
             }
-            Value::Float(n) => {
-                if *n != 0.0 {
-                    Self::Accept
-                } else {
-                    Self::Reject
-                }
+            Value::Variant { name, values } if values.len() == 1 && name == "Reject" => {
+                (Self::Reject, values[0].clone())
             }
-            Value::Bool(b) => {
-                if *b {
-                    Self::Accept
-                } else {
-                    Self::Reject
-                }
-            }
-            _ => Self::Accept,
+            other if other.is_truthy() => (Self::Accept, other),
+            other => (Self::Reject, other),
         }
     }
-    pub fn to_value(self) -> Value {
-        match self {
-            Verdict::Accept => Value::string("accept"),
-            Verdict::Reject => Value::string("reject"),
-        }
+
+    /// Wrap `payload` as the script-level `Accept(payload)`/`Reject(payload)`.
+    pub fn to_value(self, payload: Value) -> Value {
+        Value::variant(self.to_string(), vec![payload])
     }
 }
 
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Verdict::Accept => write!(f, "accept"),
-            Verdict::Reject => write!(f, "reject"),
-        }
+        f.write_str(match self {
+            Verdict::Accept => "Accept",
+            Verdict::Reject => "Reject",
+        })
     }
 }
