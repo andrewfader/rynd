@@ -12,7 +12,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # Default builds have no dependencies, so everything runs offline.
+      # The lockfile lists the optional JIT crates; fetch them once so the
+      # offline steps can resolve it.
+      - run: cargo fetch --locked
       - run: sh scripts/check.sh
 
   jit:
@@ -33,4 +35,5 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo fetch --locked
       - run: sh scripts/coverage.sh

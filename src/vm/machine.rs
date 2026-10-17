@@ -193,7 +193,7 @@ impl Machine {
                 let values =
                     self.take(n.checked_mul(2).ok_or_else(|| error("Map size overflow"))?)?;
                 let mut map = BTreeMap::new();
-                for pair in values.chunks_exact(2) {
+                for pair in values.as_chunks::<2>().0 {
                     map.insert(runtime::map_key(&pair[0]), pair[1].clone());
                 }
                 self.stack.push(Value::map(map));
