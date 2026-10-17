@@ -85,8 +85,13 @@ pub fn greet(name) {
             "src/main.rs",
             &format!(
                 r#"fn main() {{
-    let result = r#{crate_name}::Application::new(std::env::args().skip(1).collect())
-        .and_then(|mut app| app.call("main", &[]));
+    // A large stack lets deep recursion reach Rynd's call-depth limit.
+    let result = rynd::vm::safety::run_with_program_stack(|| {{
+        r#{crate_name}::Application::new(std::env::args().skip(1).collect())
+            .and_then(|mut app| app.call("main", &[]))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }});
     if let Err(error) = result {{
         eprintln!("{{error}}");
         std::process::exit(1);
@@ -238,5 +243,8 @@ const TOOLCHAIN: &[(&str, &str)] = &[
     ("src/vm/collections.rs", include_str!("vm/collections.rs")),
     ("src/vm/sockets.rs", include_str!("vm/sockets.rs")),
     ("src/vm/concurrency.rs", include_str!("vm/concurrency.rs")),
+    ("src/vm/crypto.rs", include_str!("vm/crypto.rs")),
+    ("src/vm/http.rs", include_str!("vm/http.rs")),
+    ("src/vm/store.rs", include_str!("vm/store.rs")),
     ("src/vm/value.rs", include_str!("vm/value.rs")),
 ];

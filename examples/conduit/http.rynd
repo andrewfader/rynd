@@ -1,0 +1,44 @@
+# Response and request helpers shared by the Conduit handlers.
+
+pub fn ok(conn, data) { json_response(conn, 200, data) }
+pub fn created(conn, data) { json_response(conn, 201, data) }
+
+# RealWorld error bodies: {"errors": {"field": ["message", ...]}}
+pub fn errors(conn, status, fields) { json_response(conn, status, {"errors": fields}) }
+pub fn invalid(conn, fields) { errors(conn, 422, fields) }
+pub fn unauthorized(conn) { errors(conn, 401, {"token": ["is missing or invalid"]}) }
+pub fn forbidden(conn) { errors(conn, 403, {"user": ["is not allowed to do that"]}) }
+pub fn not_found(conn, what) { errors(conn, 404, {what: ["not found"]}) }
+
+# The object under `key` in a JSON request body, or nil.
+pub fn payload(conn, key) {
+    let parsed = attempt(\ -> parse_json(conn.body), [])
+    let doc = parsed.tag == "Ok" ? parsed.value : nil
+    let inner = type_of(doc) == "map" ? doc[key] : nil
+    type_of(inner) == "map" ? inner : nil
+}
+
+pub fn bad_payload(conn, key) {
+    invalid(conn, {"body": ["must be a JSON object with a \"#{key}\" object"]})
+}
+
+# Field-error map for required fields that are missing or blank.
+pub fn require(input, fields) {
+    let blank = fields |> filter(\f -> type_of(input[f]) != "string" or trim(input[f]) == "")
+    {f: ["can't be blank"] for f in blank}
+}
+
+# A non-negative integer query parameter, or the default.
+pub fn int_param(conn, name, default) {
+    let raw = conn.query[name]
+    if raw == nil { return default }
+    let parsed = attempt(\ -> parse_int(raw), [])
+    parsed.tag == "Ok" and parsed.value >= 0 ? parsed.value : default
+}
+
+pub fn cors(conn) {
+    conn
+    |> put_resp_header("access-control-allow-origin", "*")
+    |> put_resp_header("access-control-allow-headers", "authorization, content-type")
+    |> put_resp_header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
+}

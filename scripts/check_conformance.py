@@ -52,13 +52,24 @@ cases = [
     ("newline_list_statement", "let offset = 10\n[1, 2] |> sum()", "3\n"),
     ("elvis_falsy", '[0 ?: 99, false ?: true, "" ?: "fallback"]', '[99, true, fallback]\n'),
     ("elvis_option_result", "[Some(42) ?: 99, Ok(42) ?: 99, Err(42) ?: 99]", "[Some(42), Ok(42), 99]\n"),
+    ("self_tail_call_constant_space", "fn count(n, acc) { n == 0 ? acc : count(n - 1, acc + 1) } count(200000, 0)", "200000\n"),
+    ("deep_recursion", "fn down(n) { n == 0 ? 0 : 1 + down(n - 1) } down(9000)", "9000\n"),
+    ("depth_limit", "fn down(n) { n == 0 ? 0 : 1 + down(n - 1) } down(20000)", None),
+    ("fiber_channel_handoff", r"let (tx, rx) = channel() let c = spawn(\ -> channel_recv(rx) * 2) channel_send(tx, 21) await_fiber(c)", "42\n"),
+    ("nursery_results", r"nursery(\n -> { n.spawn(\ -> { sleep_ms(5) 1 }) n.spawn(\ -> 2) })", "[1, 2]\n"),
+    ("crypto_vectors", 'let t = jwt_sign({"sub": 1}, "k")\n[sha256(""), base64_encode("hi"), jwt_verify(t, "k").value.sub, password_verify("a", password_hash("a"))]', "[e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855, aGk=, 1, true]\n"),
+    ("time_and_slugs", '[iso_time(parse_time("2026-10-17T05:41:00-04:00")), slugify("Hello, World")]', "[2026-10-17T09:41:00.000Z, hello-world]\n"),
+    ("memory_store", 'let db = store_open(":memory:") store_put(db, "c", 2, {"v": "b"}) store_put(db, "c", 1, {"v": "a"}) store_all(db, "c") |> map(\\d -> d.v)', "[a, b]\n"),
     ("division_by_zero", "1 / 0", None),
     ("type_error", "1 + true", None),
 ]
 
 example_sources = {}
 example_root = ROOT / "examples"
+# Long-running servers (examples/conduit) have their own HTTP test suite.
 for path in sorted([*example_root.glob("*.rynd"), *example_root.rglob("main.rynd")]):
+    if "conduit" in path.parts:
+        continue
     name = "example_" + "_".join(path.relative_to(example_root).with_suffix("").parts)
     example_sources[name] = path
     expected = ("Subtotal: 4200 cents\nShipping: 500 cents\nTotal: 4700 cents\n"

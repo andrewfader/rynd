@@ -336,8 +336,8 @@ impl RyndEngine {
     pub fn take_output(&mut self) -> String {
         self.machine
             .output_buffer
-            .as_mut()
-            .map(|parts| std::mem::take(parts).concat())
+            .as_ref()
+            .map(|parts| std::mem::take(&mut *parts.borrow_mut()).concat())
             .unwrap_or_default()
     }
 

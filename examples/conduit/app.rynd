@@ -1,0 +1,46 @@
+# Conduit routing: CORS, authentication, then the first matching route.
+import "http.rynd" as http
+import "users.rynd" as users
+import "articles.rynd" as articles
+
+let routes = [
+    ["POST", "/api/users/login", users.login],
+    ["POST", "/api/users", users.register],
+    ["GET", "/api/user", users.current],
+    ["PUT", "/api/user", users.update],
+    ["GET", "/api/profiles/:username", users.show_profile],
+    ["POST", "/api/profiles/:username/follow", users.follow],
+    ["DELETE", "/api/profiles/:username/follow", users.follow],
+    ["GET", "/api/articles", articles.list],
+    ["GET", "/api/articles/feed", articles.feed],
+    ["POST", "/api/articles", articles.create],
+    ["GET", "/api/articles/:slug", articles.show],
+    ["PUT", "/api/articles/:slug", articles.update],
+    ["DELETE", "/api/articles/:slug", articles.remove],
+    ["POST", "/api/articles/:slug/favorite", articles.favorite],
+    ["DELETE", "/api/articles/:slug/favorite", articles.favorite],
+    ["GET", "/api/articles/:slug/comments", articles.comments],
+    ["POST", "/api/articles/:slug/comments", articles.add_comment],
+    ["DELETE", "/api/articles/:slug/comments/:id", articles.delete_comment],
+    ["GET", "/api/tags", articles.tags]
+]
+
+fn dispatch(ctx, conn, me) {
+    let found = find(routes, \r -> r[0] == conn.method and match_route(conn.path, r[1]).tag == "Some")
+    match found {
+        Some([_, pattern, handler]) => handler(ctx, put(conn, "params", match_route(conn.path, pattern).value), me)
+        None => {
+            let known = any(routes, \r -> match_route(conn.path, r[1]).tag == "Some")
+            known ? http.errors(conn, 405, {"method": ["not allowed"]}) : http.not_found(conn, "route")
+        }
+    }
+}
+
+pub fn handle(ctx, conn) {
+    let conn = http.cors(conn)
+    if conn.method == "OPTIONS" { return conn |> put_status(204) }
+    match users.authenticate(ctx, conn) {
+        Ok(me) => dispatch(ctx, conn, me)
+        Err(_) => http.unauthorized(conn)
+    }
+}

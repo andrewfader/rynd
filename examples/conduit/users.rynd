@@ -1,0 +1,147 @@
+# Accounts, authentication, and profiles.
+import "http.rynd" as http
+
+let token_days = 30
+
+pub fn token_for(ctx, user) {
+    jwt_sign({"sub": user.id, "exp": now() / 1000 + token_days * 86400}, ctx.secret)
+}
+
+# Ok(user) for a valid token, Ok(nil) without one, Err(reason) for a bad one.
+pub fn authenticate(ctx, conn) {
+    let header = conn.headers.authorization ?: ""
+    if header == "" { return Ok(nil) }
+    let parts = split(trim(header), " ")
+    unless len(parts) == 2 and (parts[0] == "Token" or parts[0] == "Bearer") {
+        return Err("malformed authorization header")
+    }
+    match jwt_verify(parts[1], ctx.secret) {
+        Ok(claims) => {
+            let user = store_get(ctx.db, "users", claims.sub)
+            user == nil ? Err("unknown user") : Ok(user)
+        }
+        Err(reason) => Err(reason)
+    }
+}
+
+pub fn by_username(ctx, username) {
+    match store_find(ctx.db, "users", {"username": username}) {
+        [user] => user
+        _ => nil
+    }
+}
+
+fn by_email(ctx, email) {
+    match store_find(ctx.db, "users", {"email": lower(trim(email))}) {
+        [user] => user
+        _ => nil
+    }
+}
+
+fn user_json(ctx, user) {
+    {"user": {
+        "email": user.email,
+        "token": token_for(ctx, user),
+        "username": user.username,
+        "bio": user.bio,
+        "image": user.image
+    }}
+}
+
+pub fn following(ctx, me, user) {
+    me != nil and store_get(ctx.db, "follows", "#{me.id}:#{user.id}") != nil
+}
+
+pub fn profile(ctx, me, user) {
+    {"username": user.username, "bio": user.bio, "image": user.image,
+     "following": following(ctx, me, user)}
+}
+
+# Uniqueness errors for an email/username a different account already uses.
+fn taken(ctx, input, me) {
+    let mine = \other -> me != nil and other.id == me.id
+    let email_owner = input.email == nil ? nil : by_email(ctx, input.email)
+    let name_owner = input.username == nil ? nil : by_username(ctx, input.username)
+    let errors = {}
+    let errors = email_owner != nil and !mine(email_owner) ? put(errors, "email", ["has already been taken"]) : errors
+    name_owner != nil and !mine(name_owner) ? put(errors, "username", ["has already been taken"]) : errors
+}
+
+pub fn register(ctx, conn, me) {
+    let input = http.payload(conn, "user")
+    if input == nil { return http.bad_payload(conn, "user") }
+    let missing = http.require(input, ["username", "email", "password"])
+    if len(missing) > 0 { return http.invalid(conn, missing) }
+    let conflicts = taken(ctx, input, nil)
+    if len(conflicts) > 0 { return http.invalid(conn, conflicts) }
+    let id = store_next_id(ctx.db, "users")
+    let user = store_put(ctx.db, "users", id, {
+        "id": id,
+        "email": lower(trim(input.email)),
+        "username": trim(input.username),
+        "password": password_hash(input.password),
+        "bio": nil,
+        "image": nil
+    })
+    http.created(conn, user_json(ctx, user))
+}
+
+pub fn login(ctx, conn, me) {
+    let input = http.payload(conn, "user")
+    if input == nil { return http.bad_payload(conn, "user") }
+    let missing = http.require(input, ["email", "password"])
+    if len(missing) > 0 { return http.invalid(conn, missing) }
+    let user = by_email(ctx, input.email)
+    if user == nil or !password_verify(input.password, user.password) {
+        return http.errors(conn, 401, {"credentials": ["invalid"]})
+    }
+    http.ok(conn, user_json(ctx, user))
+}
+
+pub fn current(ctx, conn, me) {
+    me == nil ? http.unauthorized(conn) : http.ok(conn, user_json(ctx, me))
+}
+
+pub fn update(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let input = http.payload(conn, "user")
+    if input == nil { return http.bad_payload(conn, "user") }
+    let blank = ["email", "username", "password"]
+        |> filter(\f -> has_key(input, f) and (type_of(input[f]) != "string" or trim(input[f]) == ""))
+    if len(blank) > 0 { return http.invalid(conn, {f: ["can't be blank"] for f in blank}) }
+    let conflicts = taken(ctx, input, me)
+    if len(conflicts) > 0 { return http.invalid(conn, conflicts) }
+    let changes = {
+        "email": has_key(input, "email") ? lower(trim(input.email)) : me.email,
+        "username": has_key(input, "username") ? trim(input.username) : me.username,
+        "password": has_key(input, "password") ? password_hash(input.password) : me.password,
+        "bio": has_key(input, "bio") ? input.bio : me.bio,
+        "image": has_key(input, "image") ? input.image : me.image
+    }
+    let user = store_put(ctx.db, "users", me.id, merge(me, changes))
+    http.ok(conn, user_json(ctx, user))
+}
+
+pub fn show_profile(ctx, conn, me) {
+    let user = by_username(ctx, conn.params.username)
+    if user == nil { return http.not_found(conn, "profile") }
+    http.ok(conn, {"profile": profile(ctx, me, user)})
+}
+
+pub fn follow(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let user = by_username(ctx, conn.params.username)
+    if user == nil { return http.not_found(conn, "profile") }
+    let key = "#{me.id}:#{user.id}"
+    if conn.method == "POST" {
+        store_put(ctx.db, "follows", key, {"follower": me.id, "followee": user.id})
+    } else {
+        store_delete(ctx.db, "follows", key)
+    }
+    http.ok(conn, {"profile": profile(ctx, me, user)})
+}
+
+# Ids of the accounts `me` follows.
+pub fn followed_ids(ctx, me) {
+    store_find(ctx.db, "follows", {"follower": me.id}) |> map(\f -> f.followee)
+}

@@ -252,6 +252,10 @@ impl Compiler {
             .collect();
         self.compile_expression(body)?;
         self.emit(OpCode::Return);
+        if !self.debug {
+            // Debug builds keep every frame for backtraces and step-over.
+            mark_tail_calls(self.chunk());
+        }
         self.current_chunk = old_chunk;
         self.locals = old_locals;
         self.upvalues = old_upvalues;
@@ -454,5 +458,29 @@ impl Compiler {
         }
         self.span = old_span;
         Ok(())
+    }
+}
+
+/// Turn each call whose value flows straight to `Return` (through jumps and
+/// scope cleanup) into a `TailCall`.
+fn mark_tail_calls(chunk: &mut Chunk) {
+    for i in 0..chunk.code.len() {
+        let OpCode::Call(n) = chunk.code[i] else {
+            continue;
+        };
+        let mut j = i + 1;
+        let mut steps = 0;
+        let tail = loop {
+            steps += 1;
+            match chunk.code.get(j) {
+                Some(OpCode::Return) => break true,
+                Some(OpCode::Jump(target)) if steps < 64 => j = *target,
+                Some(OpCode::TruncateLocals(_)) => j += 1,
+                _ => break false,
+            }
+        };
+        if tail {
+            chunk.code[i] = OpCode::TailCall(n);
+        }
     }
 }

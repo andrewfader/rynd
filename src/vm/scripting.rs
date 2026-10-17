@@ -41,7 +41,136 @@ pub const BUILTINS: &[(&str, usize)] = &[
     ("type_of", 1),
     ("benchmark", 2),
     ("assert", 2),
+    ("now", 0),
+    ("iso_time", 1),
+    ("parse_time", 1),
+    ("slugify", 1),
 ];
+
+/// Milliseconds since the Unix epoch (negative before 1970).
+pub fn unix_millis() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as i64,
+        Err(e) => -(e.duration().as_millis() as i64),
+    }
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian (year, month, day).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = i64::from((month + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// RFC 3339 UTC with milliseconds: `2026-10-17T09:41:00.327Z`.
+pub fn iso_time(millis: i64) -> String {
+    let (days, ms) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
+    let (y, m, d) = civil_from_days(days);
+    let secs = ms / 1000;
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60,
+        ms % 1000
+    )
+}
+
+/// Parse RFC 3339 (`Z` or `±HH:MM` offsets, optional fraction) or a bare
+/// `YYYY-MM-DD` date into Unix milliseconds.
+pub fn parse_time(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let num = |s: &str| -> Option<i64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    let (date, rest) = match text.find(['T', 't', ' ']) {
+        Some(i) => (&text[..i], Some(&text[i + 1..])),
+        None => (text, None),
+    };
+    let mut fields = date.split('-');
+    let (year, month, day) = (
+        num(fields.next()?)?,
+        num(fields.next()?)? as u32,
+        num(fields.next()?)? as u32,
+    );
+    if fields.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    let mut millis = days * 86_400_000;
+    if let Some(rest) = rest {
+        let (clock, offset) = if let Some(clock) = rest.strip_suffix(['Z', 'z']) {
+            (clock, 0)
+        } else {
+            let i = rest.rfind(['+', '-'])?;
+            let (h, m) = rest[i + 1..].split_once(':')?;
+            let minutes = num(h)? * 60 + num(m)?;
+            (
+                &rest[..i],
+                if &rest[i..=i] == "+" {
+                    minutes
+                } else {
+                    -minutes
+                },
+            )
+        };
+        let (hms, fraction) = clock.split_once('.').unwrap_or((clock, ""));
+        let mut parts = hms.split(':');
+        let (h, m, s) = (
+            num(parts.next()?)?,
+            num(parts.next()?)?,
+            num(parts.next()?)?,
+        );
+        if parts.next().is_some() || h > 23 || m > 59 || s > 60 {
+            return None;
+        }
+        let ms = if fraction.is_empty() {
+            0
+        } else {
+            num(fraction)?;
+            format!("{fraction:0<3}")[..3].parse::<i64>().ok()?
+        };
+        millis += ((h * 60 + m) * 60 + s) * 1000 + ms - offset * 60_000;
+    }
+    Some(millis)
+}
+
+/// Lowercase ASCII words joined by hyphens: `"Hello, Wörld!"` → `"hello-w-rld"`.
+pub fn slugify(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
 fn text(value: &Value) -> RyndResult<&str> {
     <&str>::try_from(value)
 }
@@ -181,9 +310,18 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
         "sleep_ms" => {
             let ms = u64::try_from(i64::try_from(&args[0])?)
                 .map_err(|_| error("Sleep duration must be nonnegative"))?;
-            std::thread::sleep(std::time::Duration::from_millis(ms));
+            super::concurrency::sleep(std::time::Duration::from_millis(ms))?;
             Ok(Value::Nil)
         }
+        "now" => Ok(Value::Int(unix_millis())),
+        "iso_time" => Ok(Value::string(iso_time(i64::try_from(&args[0])?))),
+        "parse_time" => {
+            let source = text(&args[0])?;
+            parse_time(source)
+                .map(Value::Int)
+                .ok_or_else(|| error(format!("parse_time(): not an RFC 3339 time: {source:?}")))
+        }
+        "slugify" => Ok(Value::string(slugify(text(&args[0])?))),
         "run_process" => {
             let program = text(&args[0])?;
             let arguments = list(&args[1])?
@@ -201,7 +339,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             let mut stdin = child.stdin.take().unwrap();
             // Drain output while feeding stdin, so large bidirectional pipes cannot deadlock.
             let writer = std::thread::spawn(move || stdin.write_all(&input));
-            let output = child.wait_with_output().map_err(io)?;
+            let output = super::concurrency::blocking(|| child.wait_with_output()).map_err(io)?;
             match writer
                 .join()
                 .map_err(|_| error("Process input writer failed"))?

@@ -1,0 +1,15 @@
+# Conduit: the RealWorld (https://realworld-docs.netlify.app) backend API.
+#
+#   PORT=3000 CONDUIT_DB=conduit.db JWT_SECRET=change-me rynd run examples/conduit/main.rynd
+#
+# Every connection runs on its own fiber; the store persists to CONDUIT_DB.
+import "app.rynd" as app
+
+let host = env("HOST") ?: "127.0.0.1"
+let port = env("PORT") ?: "3000"
+let secret = env("JWT_SECRET") ?: random_token(32)
+let ctx = {"db": store_open(env("CONDUIT_DB") ?: "conduit.db"), "secret": secret}
+
+let listener = tcp_listen("#{host}:#{port}")
+println("Conduit listening on http://#{tcp_local_addr(listener)}/api")
+serve(listener, \conn -> app.handle(ctx, conn))

@@ -279,7 +279,7 @@ fn attempt_restores_nested_frames_operands_and_preserves_effects() {
             .to_string()
             .contains("host failure")
     );
-    engine.eval("fn recur() { recur() }").unwrap();
+    engine.eval("fn recur() { 1 + recur() }").unwrap();
     assert!(
         engine
             .eval("attempt(recur, [])")

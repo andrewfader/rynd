@@ -25,6 +25,11 @@ pub trait Runtime {
     fn call_depth(&self) -> usize {
         0
     }
+    /// A runtime for a new fiber: the same globals and functions with a fresh
+    /// call stack. It runs on the fiber's own thread (see `concurrency`).
+    fn fork(&self) -> RyndResult<Box<dyn Runtime>> {
+        Err(error("This runtime cannot start fibers"))
+    }
 }
 
 pub fn globals() -> HashMap<String, Value> {
@@ -100,7 +105,10 @@ pub fn globals() -> HashMap<String, Value> {
     .copied()
     .chain(super::scripting::BUILTINS.iter().copied())
     .chain(super::sockets::BUILTINS.iter().copied())
+    .chain(super::http::BUILTINS.iter().copied())
     .chain(super::concurrency::BUILTINS.iter().copied())
+    .chain(super::crypto::BUILTINS.iter().copied())
+    .chain(super::store::BUILTINS.iter().copied())
     {
         globals.insert(
             name.into(),
@@ -459,8 +467,7 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
         }
         "read_stdin" => {
             let mut text = String::new();
-            std::io::stdin()
-                .read_to_string(&mut text)
+            super::concurrency::blocking(|| std::io::stdin().read_to_string(&mut text))
                 .map_err(|e| error(format!("read_stdin(): {e}")))?;
             Ok(Value::string(text))
         }
@@ -558,8 +565,15 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
             )
         }
         _ => {
-            if super::sockets::BUILTINS.iter().any(|(b, _)| *b == name) {
+            let is = |table: &[(&str, usize)]| table.iter().any(|(b, _)| *b == name);
+            if is(super::sockets::BUILTINS) {
                 super::sockets::call(rt, name, args)
+            } else if is(super::http::BUILTINS) {
+                super::http::call(rt, name, args)
+            } else if is(super::crypto::BUILTINS) {
+                super::crypto::call(rt, name, args)
+            } else if is(super::store::BUILTINS) {
+                super::store::call(rt, name, args)
             } else if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
                 super::concurrency::call(rt, name, args)
             } else {
@@ -640,6 +654,9 @@ impl Runtime for NativeRuntime {
                 if self.depth >= super::safety::MAX_CALL_DEPTH {
                     return Err(super::safety::depth_error());
                 }
+                if super::safety::stack_exhausted() {
+                    return Err(super::safety::stack_error());
+                }
                 self.depth += 1;
                 let result = func(self, args, callee);
                 self.depth -= 1;
@@ -666,5 +683,11 @@ impl Runtime for NativeRuntime {
     }
     fn call_depth(&self) -> usize {
         self.depth
+    }
+    fn fork(&self) -> RyndResult<Box<dyn Runtime>> {
+        Ok(Box::new(NativeRuntime {
+            globals: self.globals.clone(),
+            depth: 0,
+        }))
     }
 }

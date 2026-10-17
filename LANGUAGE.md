@@ -194,7 +194,9 @@ lockfiles/profiles govern dependencies and release builds.
 
 Collections and input helpers materialize in memory. Values use `Rc`; create an
 independent runtime per thread or convert values to Rust data for transfer.
-Script call depth is bounded at 256. Scripts and native adapters execute with
+Fibers are the exception: each runs on its own thread, and the scheduler
+hands values between them one thread at a time. Script call depth is bounded
+at 10,000 nested calls; tail calls do not count. Scripts and native adapters execute with
 normal process authority; `RyndEngine::sandboxed()` removes host-access builtins
 for less-trusted scripts (see [SECURITY.md](SECURITY.md)).
 
@@ -295,121 +297,183 @@ let updated = call_method(account, "deposit", [50])
 println(call_method(updated, "summary", [])) # Balance: 150
 ```
 
-## Structured concurrency, fibers, actors, and channels
+## Fibers, nurseries, actors, and channels
 
-Rynd provides green fibers, nurseries with automatic failure cascading, actor mailboxes, and CSP channels:
-
-### Green fibers and structured nurseries
-
-- `spawn(\ -> expression)` launches a cooperative fiber and returns a `Fiber(id)` handle.
-- `await_fiber(handle)` pauses the current execution until the fiber or actor finishes, returning its result or propagating any error.
-- `yield_fiber()` cooperatively pauses the fiber to allow scheduler progress.
-- `self_id()` returns the integer identifier of the current fiber.
-- `nursery(\n -> body)` creates a structured concurrency scope. Inside `body`, child tasks are scheduled with `n.spawn(\ -> task_body)`. If any child task fails, the nursery immediately cancels sibling tasks and propagates the error to the caller. When all tasks succeed, `nursery` returns a list containing every child task's result in spawn order.
-
-```rynd
-# Structured nursery: parallel execution with fail-fast cancellation
-let results = nursery(\n -> {
-    n.spawn(\ -> fetch_metrics("server-1"))
-    n.spawn(\ -> fetch_metrics("server-2"))
-    n.spawn(\ -> fetch_metrics("server-3"))
-})
-```
-
-### Actor model and mailboxes
-
-- `spawn_actor(\mailbox -> loop)` spawns an actor fiber with an isolated mailbox and returns an `Actor(id)` handle.
-- `send(actor, message)` enqueues a message into the actor's mailbox asynchronously.
-- `receive(mailbox)` blocks until a message arrives in the mailbox and dequeues it.
-- `receive_timeout(mailbox, timeout_ms)` awaits a message up to `timeout_ms` milliseconds; returns `Some(message)` on receipt or `None` on expiration.
-- `create_mailbox()` constructs an independent mailbox handle.
-
-```rynd
-let worker = spawn_actor(\mb -> {
-    let task = receive(mb)
-    process(task)
-})
-send(worker, {"job": "resize_image", "file": "avatar.png"})
-let result = await_fiber(worker)
-```
-
-### CSP channels
-
-- `channel()` creates an unbounded FIFO channel and returns a 2-tuple `(tx, rx)`.
-- `channel_send(tx, value)` writes a value into the channel.
-- `channel_recv(rx)` blocks until a value is available and removes it.
-- `channel_try_recv(rx)` non-blockingly checks the channel, returning `Some(value)` if available or `None` if empty.
-
-```rynd
-let (tx, rx) = channel()
-let producer = spawn(\ -> {
-    [10, 20, 30] |> each(\x -> channel_send(tx, x * 2))
-})
-await_fiber(producer)
-let first = channel_recv(rx) # 20
-```
-
-## TCP networking, HTTP streaming, and web frameworks
-
-Rynd supports native TCP sockets, HTTP/1.1 parsing and streaming, and a Plug-based modular web framework inspired by Sinatra and Phoenix:
-
-### Native TCP sockets
+A fiber is a function running on its own stack. Each fiber gets an OS thread,
+and a baton makes them take turns: one fiber per program runs Rynd code at a
+time, switching at `yield_fiber`, `await_fiber`, `receive`, `channel_recv`,
+nursery joins, `sleep_ms`, and blocking I/O (sockets, HTTP, processes, stdin).
+Blocking I/O releases the baton for its whole duration, so a thousand fibers
+waiting on a thousand sockets cost a thousand parked threads, not a stalled
+program. Between switch points a fiber runs uninterrupted, so a
+read-check-write sequence without I/O is atomic. CPU-bound loops do not
+preempt; call `yield_fiber()` to share.
 
 | Function | Behavior |
 | --- | --- |
-| `tcp_listen(addr)` | Binds a TCP listener to `addr` (e.g. `"127.0.0.1:8080"`). Returns a `TcpListener(id)` handle. |
-| `tcp_accept(listener)` | Accepts an incoming connection. Returns `(stream, peer_addr)` pair or `nil` if non-blocking and no connection is pending. |
-| `tcp_connect(addr)` | Connects to a remote TCP endpoint. Returns a `TcpStream(id)` handle. |
-| `tcp_local_addr(listener)` | Returns the local bound address string (useful with `"127.0.0.1:0"` port allocation). |
-| `socket_read(stream, max_bytes)` | Reads up to `max_bytes` from the stream as a UTF-8 string. |
-| `socket_read_bytes(stream, max_bytes)` | Reads up to `max_bytes` from the stream as an integer list of bytes (`[0–255]`). |
-| `socket_write(stream, data)` | Writes a UTF-8 string or a byte list to the stream. Returns the number of bytes written. |
-| `socket_close(handle)` | Closes a TCP stream or listener. |
-| `socket_set_nonblocking(handle, bool)` | Toggles non-blocking mode on the listener or stream. |
+| `spawn(\ -> body)` | Starts a fiber and returns `Fiber(id)`. The caller keeps running until its next switch point. |
+| `await_fiber(handle)` | Waits for a fiber or actor and returns its result, or raises its error. A handle can be awaited once. |
+| `yield_fiber()` | Lets every other ready fiber run first. |
+| `self_id()` | `Fiber(id)` of the caller; the program's first thread is `Fiber(0)`. |
+| `nursery(\n -> body)` | Structured scope: `n.spawn(task)` starts children, which all finish before `nursery` returns their results in spawn order. The first failure cancels the remaining children and is raised once they stop. |
+| `spawn_actor(\mailbox -> body)` | Starts a fiber with its own mailbox; returns `Actor(id)` for `send` and `await_fiber`. |
+| `send(actor_or_mailbox, message)`, `create_mailbox()`, `close_mailbox(mb)` | Unbounded FIFO mailboxes. |
+| `receive(mailbox)` | Waits for the next message. |
+| `receive_timeout(mailbox, ms)` | `Some(message)`, or `None` after `ms` milliseconds. |
+| `channel()` | `(Sender, Receiver)` pair of an unbounded FIFO channel. |
+| `channel_send(tx, value)`, `channel_recv(rx)`, `channel_try_recv(rx)` | Send; wait for a value; or take one if present (`Some`/`None`). |
+| `close_channel(side)`, `is_channel_closed(side)` | Closing either side drops pending values and wakes blocked receivers with an error. |
 
-### HTTP parsing and chunked transfer
+Cancellation takes effect at the child's next switch point (sleeps end early);
+a cancelled child reports `Fiber cancelled`. A wait that nothing could ever
+satisfy, such as `receive` on an empty mailbox with no other runnable fiber,
+raises a `Deadlock` error instead of hanging. Engines on different OS threads
+schedule independently.
 
-- `parse_http_request(raw_text)` parses an HTTP/1.1 wire request into a record:
-  `{"method": "GET", "path": "/path", "version": "HTTP/1.1", "headers": {"host": "..."}, "body": "..."}`.
-- `format_http_response(status, headers, body)` serializes a standard HTTP/1.1 response string with appropriate status phrase and calculated `Content-Length`.
-- `socket_write_http_chunk(stream, data)` streams a chunk formatted as `HEX_LEN\r\nDATA\r\n`.
-- `socket_finish_http_chunks(stream)` emits the terminal HTTP chunk `0\r\n\r\n`.
-- `socket_read_chunk(stream, max_bytes)` reads a chunked stream payload.
+```rynd
+fn pong(mb, n) {
+    if n == 0 { "done" } else {
+        let (from, x) = receive(mb)
+        send(from, x + 1)
+        pong(mb, n - 1)       # a tail call: actors loop in constant space
+    }
+}
+let ponger = spawn_actor(\mb -> pong(mb, 1))
+let me = create_mailbox()
+send(ponger, (me, 41))
+receive(me)                   # 42
 
-### Plug web framework and routing
+nursery(\n -> {
+    n.spawn(\ -> fetch("http://127.0.0.1:3000/api/tags").status)
+    n.spawn(\ -> { sleep_ms(50); "slept alongside the request" })
+})
+```
 
-Rynd includes a composable pipeline architecture for web services:
+## Tail calls and recursion depth
+
+Recursion is how Rynd loops. A call whose result the function returns directly
+(the last expression, a branch of a final `if`/`match`, or a `return`) reuses
+the caller's frame: self-recursive tail calls run in constant space on every
+backend, and the VM extends this to all tail calls. Other calls nest up to
+`MAX_CALL_DEPTH` (10,000) frames. CLI runs, generated binaries, Cargo project
+entry points, and fibers get 256–512 MiB stack reservations (committed only
+as used), so the limit, not the stack, decides; on a host thread of unknown
+size Rynd stops at a conservative stack budget with the same depth error.
+Debug sessions keep every frame so backtraces and step-over stay exact.
+
+## HTTP services and clients
+
+`serve(target, handler)` runs an HTTP/1.1 server. `target` is an address
+string, a `TcpListener`, or `{"listener"|"addr": ..., "max_connections": n}`.
+Each connection gets a fiber that reads requests (fixed-length or chunked
+bodies, keep-alive and pipelining), calls `handler(conn)`, and writes the conn
+it returns. A handler error becomes a logged `500`; malformed requests get
+`400`, oversized heads `431`, and bodies over 16 MiB `413`. Without
+`max_connections` the server runs until the program exits; with it, `serve`
+returns the number of requests served.
+
+The handler's `conn` is a map:
+
+| Key | Contents |
+| --- | --- |
+| `method`, `path`, `version` | Request line; `path` excludes the query string. |
+| `query_string`, `query` | Raw query and its decoded map (`+` is a space; repeated keys keep the last). |
+| `headers`, `body` | Lowercase header names; body text. |
+| `params` | Empty; routers fill it from `match_route`. |
+| `remote_addr`, `socket` | Peer address and the `TcpStream`, for streaming. |
+| `status`, `resp_headers`, `resp_body`, `halted` | The response under construction. |
+
+Return the conn with `"sent": true` after writing the response yourself, for
+example with `socket_write_http_chunk`. `read_http_request(stream)` reads one
+request into the same shape for hand-rolled accept loops.
 
 | Function | Behavior |
 | --- | --- |
-| `conn(method, path)` | Initializes a connection map: `{"method": method, "path": path, "params": {}, "query": {}, "headers": {}, "body": "", "status": 200, "resp_headers": {"content-type": "text/html; charset=utf-8"}, "resp_body": "", "halted": false}`. |
-| `match_route(path, pattern)` | Compares `path` against a route pattern with `:param` capture segments and `*wildcard` rest parameters. Returns `Some(params_map)` or `None`. |
-| `halt(conn)` | Sets `conn.halted = true` to short-circuit downstream plugs in a pipeline. |
-| `put_status(conn, status)` | Updates the response status code on `conn`. |
-| `put_resp_header(conn, key, val)` | Adds or overrides a response header on `conn`. |
-| `put_resp_body(conn, body)` | Replaces the response body on `conn`. |
-| `text_response(conn, status, body)` | Configures status, sets `content-type: text/plain`, updates body, and halts `conn`. |
-| `json_response(conn, status, data)` | Serializes `data` to JSON via `to_json()`, sets `content-type: application/json`, and halts `conn`. |
-| `html_response(conn, status, html)` | Configures status, sets `content-type: text/html`, updates body, and halts `conn`. |
-| `plug_send(conn, stream)` | Formats the final HTTP response and writes it to the active TCP stream. |
+| `fetch(url)` | `GET`; returns `{"status", "reason", "headers", "body"}`. |
+| `http_request(opts)` | `{"method", "url", "headers", "body", "timeout_ms"}`. A non-string `body` is sent as JSON. Reads fixed-length, chunked, and close-delimited responses. `http://` only; TLS belongs to a Rust adapter. |
+| `url_encode(text)`, `url_decode(text)` | RFC 3986 percent-encoding (unreserved characters pass through). |
+| `parse_query(text)`, `query_string(map)` | Form-style query strings to and from maps. |
+
+### Plugs and routing
+
+| Function | Behavior |
+| --- | --- |
+| `conn(method, target)` | A conn for tests and pipelines; `target` may carry a query string. |
+| `match_route(path, pattern)` | `Some(params)` for `:name` segments and a trailing `*rest`, percent-decoded; else `None`. |
+| `halt(conn)`, `put_status(conn, n)`, `put_resp_header(conn, k, v)`, `put_resp_body(conn, text)` | Return updated conns. |
+| `text_response`, `json_response`, `html_response` | `(conn, status, body)`: set status, content type (UTF-8 text, or `application/json`), and body, and halt. `json_response` encodes data with `to_json`. |
+| `plug_send(conn, stream)` | Write the conn's response to a stream and close it. |
+| `parse_http_request(text)`, `format_http_response(status, headers, body)` | Wire-format conversions with standard reason phrases and `Content-Length`. |
 
 ```rynd
-fn router(conn) {
-    if conn.halted { return conn }
-
+fn app(conn) {
     let m = match_route(conn.path, "/api/users/:id")
     if m.tag == "Some" and conn.method == "GET" {
-        return json_response(conn, 200, {"id": m.value.id, "active": true})
+        return json_response(conn, 200, {"id": m.value.id, "q": conn.query.q})
     }
-
     text_response(conn, 404, "Not Found")
 }
-
-let response = conn("GET", "/api/users/42")
-    |> (\c -> put_resp_header(c, "x-request-id", "req-1"))()
-    |> router()
-println(response.resp_body) # {"active":true,"id":"42"}
+serve("127.0.0.1:8080", app)
 ```
+
+[examples/conduit](examples/conduit) implements the RealWorld API on these
+pieces: routing, JWT authentication, password hashing, and the document store.
+
+### TCP sockets
+
+| Function | Behavior |
+| --- | --- |
+| `tcp_listen(addr)` | Binds a `TcpListener` (`"127.0.0.1:0"` picks a port). |
+| `tcp_accept(listener)` | `(stream, peer_addr)`, or nil when non-blocking with none pending. |
+| `tcp_connect(addr)` | Connects within 5 seconds; host names resolve. |
+| `tcp_local_addr(listener)` | The bound address. |
+| `socket_read(stream, n)`, `socket_read_bytes(stream, n)` | Up to n bytes as text or a byte list; nil when non-blocking with nothing to read. |
+| `socket_write(stream, data)` | Writes a string or byte list; returns the byte count. |
+| `socket_write_http_chunk(stream, data)`, `socket_finish_http_chunks(stream)` | Chunked transfer framing. |
+| `socket_read_chunk(stream, max)` | Decodes the next chunk; nil after the final one. |
+| `socket_close(handle)`, `socket_set_nonblocking(handle, flag)` | For streams and listeners. |
+
+## Hashing, tokens, and passwords
+
+SHA-256, HMAC, PBKDF2, base64, and HS256 JWTs are built in with no
+dependencies and checked against their RFC test vectors. Randomness comes from
+the operating system. Inputs are strings (UTF-8) or byte lists.
+
+| Function | Behavior |
+| --- | --- |
+| `sha256(data)`, `hmac_sha256(key, data)`, `hex_encode(data)` | Lowercase hex digests. |
+| `base64_encode(data)`, `base64url_encode(data)` | Padded standard / unpadded URL-safe alphabets. |
+| `base64_decode(text)`, `base64url_decode(text)`, `base64_decode_bytes(text)` | Either alphabet, padding optional; text (UTF-8) or bytes. |
+| `to_bytes(text)`, `from_bytes(bytes)` | UTF-8 conversions. |
+| `random_bytes(n)`, `random_token(n)`, `random_int(lo, hi)`, `uuid()` | OS randomness: bytes, an n-byte URL-safe token, an unbiased integer in `lo..hi`, a v4 UUID. |
+| `password_hash(password)`, `password_verify(password, stored)` | Salted PBKDF2-HMAC-SHA256 (100,000 rounds) in a self-describing `$pbkdf2-sha256$...` string; constant-time comparison. |
+| `jwt_sign(claims, secret)`, `jwt_verify(token, secret)` | HS256 tokens; verify returns `Ok(claims)` or `Err(reason)`, checking `exp`/`nbf` (seconds). |
+| `secure_compare(a, b)` | Constant-time equality. |
+
+## Time and text
+
+`now()` returns Unix milliseconds. `iso_time(ms)` formats RFC 3339 UTC with
+milliseconds (`2026-10-17T09:41:00.327Z`); `parse_time(text)` reads RFC 3339
+with `Z` or `±HH:MM` offsets, or a bare date, and rejects impossible dates.
+`slugify(text)` lowercases ASCII words and joins them with hyphens.
+
+## Document store
+
+`store_open(path)` opens a store of named collections of documents keyed by
+integer or string ids (`":memory:"` keeps it in memory). Writes append JSON
+Lines to the file before returning; opening replays the log, skips a torn final
+line, and compacts logs that outgrow their data. A store belongs to the program
+(fiber group) that opened it.
+
+| Function | Behavior |
+| --- | --- |
+| `store_put(db, collection, id, doc)` | Insert or replace; returns doc. |
+| `store_get(db, collection, id)` | The document, or nil. |
+| `store_delete(db, collection, id)` | Whether a document was removed. |
+| `store_all(db, collection)`, `store_count(db, collection)` | Documents in id order (integers first, numerically), and their count. |
+| `store_find(db, collection, fields)` | Documents whose fields equal every given value. |
+| `store_next_id(db, collection)` | A persistent per-collection integer sequence. |
+| `store_close(db)` | Flushes to disk and releases the handle. |
 
 ## Recoverable errors
 

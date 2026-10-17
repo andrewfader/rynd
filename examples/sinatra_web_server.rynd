@@ -1,5 +1,5 @@
 # Sinatra & Phoenix-style Web Framework in Rynd
-# Demonstrates: Plugs, Route matching, Sub-app Engines, and HTTP Streaming
+# Demonstrates: Plugs, route matching, sub-app engines, and a real HTTP server
 
 # Middleware Plugs
 fn plug_logger(conn) {
@@ -89,13 +89,20 @@ fn handle_connection(raw_conn) {
     |> app_router()
 }
 
-# Test the pipeline in-memory
-let test_req1 = conn("GET", "/api/users/42") |> handle_connection()
-let test_req2 = conn("GET", "/admin/metrics") |> handle_connection()
-let test_req3 = conn("POST", "/api/deploy")
-    |> put("body", '{"service": "payments-worker"}')
-    |> handle_connection()
+# Serve for real on an ephemeral port, from a fiber, and call it over HTTP.
+let listener = tcp_listen("127.0.0.1:0")
+let base = "http://#{tcp_local_addr(listener)}"
+let server = spawn(\ -> serve({"listener": listener, "max_connections": 3}, handle_connection))
 
-println("Req 1 (User API)  : Status #{test_req1.status} -> #{test_req1.resp_body}")
-println("Req 2 (Admin Eng) : Status #{test_req2.status} -> #{test_req2.resp_body}")
-println("Req 3 (Deployment): Status #{test_req3.status} -> #{test_req3.resp_body}")
+let user = fetch("#{base}/api/users/42")
+let metrics = fetch("#{base}/admin/metrics")
+let deploy = http_request({
+    "method": "POST",
+    "url": "#{base}/api/deploy",
+    "body": {"service": "payments-worker"}
+})
+await_fiber(server)
+
+println("GET /api/users/42  : #{user.status} #{user.body}")
+println("GET /admin/metrics : #{metrics.status} #{metrics.body}")
+println("POST /api/deploy   : #{deploy.status} #{deploy.body} (#{deploy.headers["x-powered-by"]})")

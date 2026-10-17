@@ -182,20 +182,20 @@ fn depth_limit_matches_the_vm() {
     assert_eq!(result.unwrap(), Value::Int(255));
     assert_eq!(compiled, names(&["down", "forever"]));
 
-    let over = differential("fn down(n) { if n == 0 { 0 } else { 1 + down(n - 1) } }\ndown(256)").0;
+    let over =
+        differential("fn down(n) { if n == 0 { 0 } else { 1 + down(n - 1) } }\ndown(10000)").0;
     assert!(
         over.unwrap_err()
             .to_string()
-            .contains("Call depth limit exceeded (256)")
+            .contains("Call depth limit exceeded")
     );
 
-    let forever = differential("fn forever(n) { forever(n + 1) }\nforever(0)").0;
-    assert!(
-        forever
-            .unwrap_err()
-            .to_string()
-            .contains("Call depth limit exceeded (256)")
+    // Self tail calls loop in place on both backends, so they never hit the limit.
+    let (counted, compiled) = differential(
+        "fn count(n, acc) { if n == 0 { acc } else { count(n - 1, acc + 1) } }\ncount(1000000, 0)",
     );
+    assert_eq!(counted.unwrap(), Value::Int(1_000_000));
+    assert_eq!(compiled, names(&["count"]));
 }
 
 #[test]
@@ -266,16 +266,16 @@ fn depth_limit_spans_bytecode_and_native_frames() {
     // `wrap` stays on the VM (it calls a builtin); `down` is native.
     let program = "
         fn down(n) { if n == 0 { 0 } else { 1 + down(n - 1) } }
-        fn wrap(s, n) { if n == 0 { down(200) + len(s) } else { wrap(s, n - 1) } }
+        fn wrap(s, n) { if n == 0 { down(5000) + len(s) } else { 0 + wrap(s, n - 1) } }
     ";
-    let (fits, compiled) = differential(&format!("{program}wrap(\"x\", 50)"));
-    assert_eq!(fits.unwrap(), Value::Int(201));
+    let (fits, compiled) = differential(&format!("{program}wrap(\"x\", 4000)"));
+    assert_eq!(fits.unwrap(), Value::Int(5001));
     assert_eq!(compiled, names(&["down"]));
-    let (over, _) = differential(&format!("{program}wrap(\"x\", 100)"));
+    let (over, _) = differential(&format!("{program}wrap(\"x\", 6000)"));
     assert!(
         over.unwrap_err()
             .to_string()
-            .contains("Call depth limit exceeded (256)")
+            .contains("Call depth limit exceeded")
     );
 }
 

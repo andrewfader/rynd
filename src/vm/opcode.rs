@@ -40,6 +40,9 @@ pub enum OpCode {
     JumpIfFalse(usize),
     JumpIfTrue(usize),
     Call(usize),
+    /// A call whose result the function returns directly: bytecode callees
+    /// reuse the caller's frame, so tail recursion runs in constant space.
+    TailCall(usize),
     Return,
     Halt,
 }

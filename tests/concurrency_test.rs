@@ -248,3 +248,157 @@ fn test_await_fiber_twice_returns_cached_result() {
     let res = engine.eval(code).expect("Eval failed");
     assert_eq!(res, Value::list(vec![Value::Int(42), Value::string("Err")]));
 }
+
+#[test]
+fn receivers_block_until_another_fiber_sends() {
+    // The consumer starts first and parks in channel_recv; only a real
+    // suspension lets the producer run and wake it.
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        let (tx, rx) = channel()
+        let consumer = spawn(\ -> [channel_recv(rx), channel_recv(rx)])
+        let producer = spawn(\ -> {
+            channel_send(tx, 1)
+            yield_fiber()
+            channel_send(tx, 2)
+        })
+        await_fiber(producer)
+        await_fiber(consumer)
+    "#;
+    assert_eq!(
+        engine.eval(code).unwrap(),
+        Value::list(vec![Value::Int(1), Value::Int(2)])
+    );
+}
+
+#[test]
+fn actors_ping_pong_in_constant_space() {
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        fn pong(mb, n) {
+            if n == 0 { "done" } else {
+                let (from, x) = receive(mb)
+                send(from, x + 1)
+                pong(mb, n - 1)
+            }
+        }
+        fn ping(mb, peer, n, last) {
+            if n == 0 { last } else {
+                send(peer, (mb, last))
+                ping(mb, peer, n - 1, receive(mb))
+            }
+        }
+        let ponger = spawn_actor(\mb -> pong(mb, 20000))
+        let me = create_mailbox()
+        [ping(me, ponger, 20000, 0), await_fiber(ponger)]
+    "#;
+    assert_eq!(
+        engine.eval(code).unwrap(),
+        Value::list(vec![Value::Int(20000), Value::string("done")])
+    );
+}
+
+#[test]
+fn waiting_with_no_one_left_to_wake_us_is_a_deadlock_error() {
+    let mut engine = RyndEngine::new();
+    for code in [
+        "receive(create_mailbox())",
+        "let (tx, rx) = channel()\nchannel_recv(rx)",
+        "let f = spawn(\\ -> receive(create_mailbox()))\nawait_fiber(f)",
+    ] {
+        let error = engine.eval(code).unwrap_err().to_string();
+        assert!(error.contains("Deadlock"), "{code}: {error}");
+    }
+    // The engine stays usable afterwards.
+    assert_eq!(engine.eval("1 + 1").unwrap(), Value::Int(2));
+}
+
+#[test]
+fn sleeping_fibers_overlap() {
+    let mut engine = RyndEngine::new();
+    let started = std::time::Instant::now();
+    let code = r#"
+        nursery(\n -> {
+            n.spawn(\ -> { sleep_ms(300); 1 })
+            n.spawn(\ -> { sleep_ms(300); 2 })
+            n.spawn(\ -> { sleep_ms(300); 3 })
+        })
+    "#;
+    assert_eq!(
+        engine.eval(code).unwrap(),
+        Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(800),
+        "{elapsed:?}"
+    );
+}
+
+#[test]
+fn a_failing_child_cancels_its_sleeping_siblings() {
+    let mut engine = RyndEngine::new();
+    let started = std::time::Instant::now();
+    let code = r#"
+        let ch = channel()
+        let outcome = attempt(\ -> nursery(\n -> {
+            n.spawn(\ -> { sleep_ms(20000); "late" })
+            n.spawn(\ -> channel_recv(ch[1]))
+            n.spawn(\ -> { sleep_ms(10); 1 / 0 })
+        }), [])
+        outcome
+    "#;
+    let outcome = engine.eval(code).unwrap().to_string();
+    assert!(outcome.contains("Division by zero"), "{outcome}");
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+}
+
+#[test]
+fn fibers_get_deep_stacks_and_tail_calls() {
+    let mut engine = RyndEngine::new();
+    let code = r#"
+        fn down(n) { n == 0 ? 0 : 1 + down(n - 1) }
+        fn spin(n) { n == 0 ? "spun" : spin(n - 1) }
+        let f = spawn(\ -> [down(5000), spin(200000)])
+        await_fiber(f)
+    "#;
+    assert_eq!(
+        engine.eval(code).unwrap(),
+        Value::list(vec![Value::Int(5000), Value::string("spun")])
+    );
+}
+
+#[test]
+fn fiber_output_is_captured_by_the_engine() {
+    let mut engine = RyndEngine::new();
+    engine.enable_output_capture();
+    engine
+        .eval(r#"await_fiber(spawn(\ -> println("from a fiber")))"#)
+        .unwrap();
+    assert_eq!(engine.captured_output(), "from a fiber\n");
+}
+
+#[test]
+fn engines_on_separate_threads_schedule_independently() {
+    let threads: Vec<_> = (0..4)
+        .map(|i| {
+            std::thread::spawn(move || {
+                let mut engine = RyndEngine::new();
+                engine.set_global("seed", Value::Int(i));
+                engine
+                    .eval(
+                        r#"
+                        let fibers = range(0, 20) |> map(\k -> spawn(\ -> { yield_fiber(); seed * 100 + k }))
+                        fibers |> map(await_fiber) |> sum()
+                    "#,
+                    )
+                    .unwrap()
+                    .to_string()
+            })
+        })
+        .collect();
+    for (i, thread) in threads.into_iter().enumerate() {
+        assert_eq!(thread.join().unwrap(), (i * 2000 + 190).to_string());
+    }
+}

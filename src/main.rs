@@ -1,3 +1,3 @@
 fn main() {
-    rynd::cli::main();
+    rynd::vm::safety::run_with_program_stack(rynd::cli::main);
 }

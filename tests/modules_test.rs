@@ -124,16 +124,26 @@ fn compiled_entry_points_are_reusable_and_session_bound() {
     assert!(RyndEngine::new().run(&compiled).is_err());
     vm.reset();
     assert!(vm.run(&compiled).is_err());
-    vm.eval("fn depth(n) { n == 0 ? 0 : depth(n - 1) }")
+    let limit = rynd::vm::safety::MAX_CALL_DEPTH as i64;
+    vm.eval("fn depth(n) { n == 0 ? 0 : 1 + depth(n - 1) }")
         .unwrap();
-    assert_eq!(vm.call("depth", &[Value::Int(255)]).unwrap(), Value::Int(0));
+    assert_eq!(
+        vm.call("depth", &[Value::Int(limit - 1)]).unwrap(),
+        Value::Int(limit - 1)
+    );
     assert!(
-        vm.call("depth", &[Value::Int(256)])
+        vm.call("depth", &[Value::Int(limit)])
             .unwrap_err()
             .to_string()
             .contains("Call depth limit")
     );
-    assert_eq!(vm.call("depth", &[Value::Int(1)]).unwrap(), Value::Int(0));
+    assert_eq!(vm.call("depth", &[Value::Int(1)]).unwrap(), Value::Int(1));
+    // Tail calls reuse their frame, so they are not limited by depth.
+    vm.eval("fn spin(n) { n == 0 ? 0 : spin(n - 1) }").unwrap();
+    assert_eq!(
+        vm.call("spin", &[Value::Int(limit * 10)]).unwrap(),
+        Value::Int(0)
+    );
 }
 
 #[test]

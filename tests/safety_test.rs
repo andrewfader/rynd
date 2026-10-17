@@ -5,7 +5,7 @@
 fn safety_call_depth_constant_exists() {
     // Bounds are enforced as compile-time assertions next to the constant.
     const _: () = assert!(rynd::vm::safety::MAX_CALL_DEPTH >= 64);
-    const _: () = assert!(rynd::vm::safety::MAX_CALL_DEPTH <= 4096);
+    const _: () = assert!(rynd::vm::safety::MAX_CALL_DEPTH <= 100_000);
 }
 
 #[test]

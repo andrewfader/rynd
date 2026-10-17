@@ -2,6 +2,8 @@
 pub mod collections;
 pub mod compiler;
 pub mod concurrency;
+pub mod crypto;
+pub mod http;
 pub mod json;
 pub mod machine;
 pub mod opcode;
@@ -9,4 +11,5 @@ pub mod runtime;
 pub mod safety;
 pub mod scripting;
 pub mod sockets;
+pub mod store;
 pub mod value;

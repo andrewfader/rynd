@@ -781,6 +781,10 @@ fn define_function(
         b.def_var(var, *value);
         scopes.push((name.as_str(), var));
     }
+    // Self tail calls redefine the parameters and jump back to `body`.
+    let body = b.create_block();
+    b.ins().jump(body, &[]);
+    b.switch_to_block(body);
     let mut g = Gen {
         b,
         an,
@@ -790,9 +794,13 @@ fn define_function(
         depth: params[arity],
         status: params[arity + 1],
         exit,
+        body,
+        arity,
+        tail: false,
         bail: None,
         sites,
     };
+    g.tail = true;
     if let Some(value) = g.expr(an.funcs[current].body, false)? {
         g.b.ins().jump(exit, &[value.into()]);
     }
@@ -818,6 +826,11 @@ struct Gen<'a, 'p> {
     depth: ir::Value,
     status: ir::Value,
     exit: ir::Block,
+    /// Loop header after the entry block, the target of self tail calls.
+    body: ir::Block,
+    arity: usize,
+    /// Whether the expression being compiled is in tail position.
+    tail: bool,
     /// Shared block returning after a callee already reported an error.
     bail: Option<ir::Block>,
     sites: &'a mut Vec<Site>,
@@ -900,6 +913,8 @@ impl<'p> Gen<'_, 'p> {
 
     fn expr(&mut self, e: &'p Expr, discard: bool) -> Flow {
         use BinaryOp::*;
+        // Only the branches and final expressions below inherit tail position.
+        let tail = std::mem::replace(&mut self.tail, false);
         Ok(Some(match &e.kind {
             ExprKind::Literal(Literal::Int(n)) => self.int(*n),
             ExprKind::Literal(Literal::Bool(v)) => self.int(i64::from(*v)),
@@ -958,15 +973,16 @@ impl<'p> Gen<'_, 'p> {
                 }
             }
             ExprKind::Call { callee, args } => {
-                value!(self.call(callee, args.iter().collect(), &e.span))
+                value!(self.call(callee, args.iter().collect(), &e.span, tail))
             }
             ExprKind::Pipeline { left, right } => match &right.kind {
                 ExprKind::Call { callee, args } => value!(self.call(
                     callee,
                     std::iter::once(&**left).chain(args).collect(),
-                    &e.span
+                    &e.span,
+                    tail
                 )),
-                _ => value!(self.call(right, vec![left], &e.span)),
+                _ => value!(self.call(right, vec![left], &e.span, tail)),
             },
             ExprKind::If {
                 condition,
@@ -986,7 +1002,10 @@ impl<'p> Gen<'_, 'p> {
                 ] {
                     self.b.switch_to_block(block);
                     let value = match branch {
-                        Some(branch) => self.expr(branch, discard)?,
+                        Some(branch) => {
+                            self.tail = tail;
+                            self.expr(branch, discard)?
+                        }
                         None => Some(self.int(0)),
                     };
                     if let Some(value) = value {
@@ -1005,6 +1024,7 @@ impl<'p> Gen<'_, 'p> {
                 final_expr,
             } => {
                 let mark = self.scopes.len();
+                self.tail = tail;
                 let result = self.block(statements, final_expr.as_deref(), discard);
                 self.scopes.truncate(mark);
                 return result;
@@ -1014,6 +1034,7 @@ impl<'p> Gen<'_, 'p> {
     }
 
     fn block(&mut self, statements: &'p [Stmt], tail: Option<&'p Expr>, discard: bool) -> Flow {
+        let in_tail = std::mem::replace(&mut self.tail, false);
         for stmt in statements {
             match stmt {
                 Stmt::Let { pattern, init, .. } => {
@@ -1028,6 +1049,7 @@ impl<'p> Gen<'_, 'p> {
                     value!(self.expr(e, true));
                 }
                 Stmt::Return { value: Some(v), .. } => {
+                    self.tail = true;
                     let v = value!(self.expr(v, false));
                     self.b.ins().jump(self.exit, &[v.into()]);
                     return Ok(None);
@@ -1036,7 +1058,10 @@ impl<'p> Gen<'_, 'p> {
             }
         }
         match tail {
-            Some(e) => self.expr(e, discard),
+            Some(e) => {
+                self.tail = in_tail;
+                self.expr(e, discard)
+            }
             None if discard => Ok(Some(self.int(0))),
             None => Err("block without a value".into()),
         }
@@ -1051,7 +1076,7 @@ impl<'p> Gen<'_, 'p> {
             .ok_or_else(|| format!("unknown local {name}"))
     }
 
-    fn call(&mut self, callee: &'p Expr, args: Vec<&'p Expr>, span: &Span) -> Flow {
+    fn call(&mut self, callee: &'p Expr, args: Vec<&'p Expr>, span: &Span, tail: bool) -> Flow {
         let ExprKind::Identifier(name) = &callee.kind else {
             return Err("indirect call".into());
         };
@@ -1064,6 +1089,15 @@ impl<'p> Gen<'_, 'p> {
         let mut values = Vec::with_capacity(args.len() + 2);
         for arg in args {
             values.push(value!(self.expr(arg, false)));
+        }
+        if tail && target == self.current && values.len() == self.arity {
+            // Same frame, same depth: rebind the parameters and loop.
+            for (i, value) in values.into_iter().enumerate() {
+                let var = self.scopes[i].1;
+                self.b.def_var(var, value);
+            }
+            self.b.ins().jump(self.body, &[]);
+            return Ok(None);
         }
         let too_deep = self.b.ins().icmp_imm_s(
             IntCC::SignedGreaterThanOrEqual,

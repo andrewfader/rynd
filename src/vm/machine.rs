@@ -3,6 +3,7 @@ use super::runtime::{self, Runtime, error};
 use super::safety::MAX_CALL_DEPTH;
 use super::value::Value;
 use crate::error::{RyndError, RyndResult, Span};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::rc::Rc;
@@ -21,7 +22,8 @@ pub struct Machine {
     pub stack: Vec<Value>,
     pub frames: Vec<CallFrame>,
     pub globals: HashMap<String, Value>,
-    pub output_buffer: Option<Vec<String>>,
+    /// Shared with fibers forked from this machine, so their output is captured too.
+    pub output_buffer: Option<Rc<RefCell<Vec<String>>>>,
     local_pool: Vec<Vec<Value>>,
     pub debugger: Option<Box<dyn crate::debugger::DebugHook>>,
     pub debug_symbols: Vec<super::opcode::DebugSymbols>,
@@ -40,10 +42,13 @@ impl Machine {
         }
     }
     pub fn enable_output_capture(&mut self) {
-        self.output_buffer = Some(Vec::new());
+        self.output_buffer = Some(Rc::default());
     }
     pub fn get_captured_output(&self) -> Vec<String> {
-        self.output_buffer.clone().unwrap_or_default()
+        self.output_buffer
+            .as_ref()
+            .map(|parts| parts.borrow().clone())
+            .unwrap_or_default()
     }
     pub fn register_fn(&mut self, name: &str, arity: usize, func: super::value::NativeFunction) {
         self.globals.insert(
@@ -285,7 +290,8 @@ impl Machine {
                     self.frames.last_mut().unwrap().ip = offset;
                 }
             }
-            OpCode::Call(n) => {
+            OpCode::Call(n) | OpCode::TailCall(n) => {
+                let tail = matches!(op, OpCode::TailCall(_));
                 let start = self
                     .stack
                     .len()
@@ -296,6 +302,13 @@ impl Machine {
                 let callee = self.pop()?;
                 runtime::check_arity(&callee, args.len())?;
                 if matches!(callee, Value::Closure { .. } | Value::Function { .. }) {
+                    if tail && !matches!(self.frames.last().unwrap().callee, Value::Nil) {
+                        // Replace the returning frame instead of stacking a new one.
+                        let mut frame = self.frames.pop().unwrap();
+                        self.stack.truncate(frame.stack_offset);
+                        frame.locals.clear();
+                        self.local_pool.push(frame.locals);
+                    }
                     self.push_frame(callee, args)?;
                 } else {
                     let value = self.call_ref(&callee, &args)?;
@@ -373,6 +386,9 @@ impl Runtime for Machine {
         runtime::check_arity(callee, args.len())?;
         match callee {
             Value::Closure { .. } | Value::Function { .. } => {
+                if super::safety::stack_exhausted() {
+                    return Err(super::safety::stack_error());
+                }
                 let depth = self.frames.len();
                 let stack_len = self.stack.len();
                 let mut locals = self.local_pool.pop().unwrap_or_default();
@@ -396,8 +412,8 @@ impl Runtime for Machine {
         self.call_ref(&callee, &args)
     }
     fn write(&mut self, text: &str) -> RyndResult<()> {
-        if let Some(output) = &mut self.output_buffer {
-            output.push(text.into());
+        if let Some(output) = &self.output_buffer {
+            output.borrow_mut().push(text.into());
             Ok(())
         } else {
             std::io::stdout()
@@ -416,5 +432,11 @@ impl Runtime for Machine {
     }
     fn call_depth(&self) -> usize {
         self.function_depth()
+    }
+    fn fork(&self) -> RyndResult<Box<dyn Runtime>> {
+        let mut child = Machine::new(self.chunks.clone());
+        child.globals = self.globals.clone();
+        child.output_buffer = self.output_buffer.clone();
+        Ok(Box::new(child))
     }
 }

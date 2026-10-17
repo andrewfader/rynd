@@ -55,34 +55,48 @@ include introspection, history, and expression benchmarks.
 
 ## Concurrency and web services
 
-Run lightweight green fibers, coordinate tasks with fail-fast structured
-nurseries, isolate state with actor mailboxes, and stream with CSP channels:
+Fibers get real stacks and take turns on a baton: blocking I/O hands it off,
+so one slow client never stalls the rest. Nurseries cancel siblings on the
+first failure, actors own mailboxes, channels block until fed, and a wait that
+can never finish is reported as a deadlock instead of a hang:
 
 ```rynd
-# Structured nursery: runs tasks concurrently, canceling siblings if any fail
 let results = nursery(\n -> {
-    n.spawn(\ -> fetch("https://api-1.local"))
-    n.spawn(\ -> fetch("https://api-2.local"))
+    n.spawn(\ -> fetch("http://127.0.0.1:8080/api/health").status)
+    n.spawn(\ -> fetch("http://127.0.0.1:8081/api/health").status)
 })
 ```
 
-Build modular web services and micro-frameworks using native TCP sockets,
-Sinatra/Phoenix-style Plugs, route pattern matching, and HTTP streaming:
+`serve` speaks HTTP/1.1 with keep-alive and chunked bodies, one fiber per
+connection. Plugs are functions from conn to conn:
 
 ```rynd
-fn router(conn) {
+fn app(conn) {
     let m = match_route(conn.path, "/api/nodes/:id")
     if m.tag == "Some" and conn.method == "GET" {
         return json_response(conn, 200, {"id": m.value.id, "status": "healthy"})
     }
     text_response(conn, 404, "Not Found")
 }
-
-let response = conn("GET", "/api/nodes/worker-1") |> router()
+serve("127.0.0.1:8080", app)
 ```
 
-Inspect the [orchestration platform](examples/orchestrator_platform.rynd) and
-[Sinatra web server](examples/sinatra_web_server.rynd) examples.
+The batteries a backend reaches for are built in, with no crates: SHA-256 and
+HMAC, PBKDF2 password hashes, HS256 JWTs, base64, UUIDs, RFC 3339 time, and
+a crash-safe document store. Tail calls loop in constant space, which matters
+in a language where recursion is the loop.
+
+[examples/conduit](examples/conduit) is the [RealWorld](https://realworld-docs.netlify.app)
+"Conduit" API in about 500 lines of Rynd, tested over HTTP on the VM and as a
+native binary:
+
+```sh
+PORT=3000 JWT_SECRET=change-me rynd run examples/conduit/main.rynd
+rynd build examples/conduit/main.rynd -o conduit && ./conduit
+```
+
+Also: the [orchestration platform](examples/orchestrator_platform.rynd) and the
+[Sinatra-style server](examples/sinatra_web_server.rynd).
 
 ## Ship it
 

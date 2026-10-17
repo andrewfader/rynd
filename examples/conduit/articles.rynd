@@ -1,0 +1,216 @@
+# Articles, favorites, comments, and tags.
+import "http.rynd" as http
+import "users.rynd" as users
+
+fn by_slug(ctx, slug) {
+    match store_find(ctx.db, "articles", {"slug": slug}) {
+        [article] => article
+        _ => nil
+    }
+}
+
+# A slug no other article uses: "how-to-train" or "how-to-train-7".
+fn unique_slug(ctx, title, id) {
+    let base = slugify(title) ?: "article"
+    let owner = by_slug(ctx, base)
+    owner == nil or owner.id == id ? base : "#{base}-#{id}"
+}
+
+fn favorite_key(user_id, article_id) { "#{user_id}:#{article_id}" }
+
+fn favorites_count(ctx, article) {
+    store_count_where(ctx, "favorites", {"article": article.id})
+}
+
+fn store_count_where(ctx, collection, fields) { len(store_find(ctx.db, collection, fields)) }
+
+fn article_json(ctx, me, article) {
+    let author = store_get(ctx.db, "users", article.author)
+    {
+        "slug": article.slug,
+        "title": article.title,
+        "description": article.description,
+        "body": article.body,
+        "tagList": article.tagList,
+        "createdAt": iso_time(article.createdAt),
+        "updatedAt": iso_time(article.updatedAt),
+        "favorited": me != nil and store_get(ctx.db, "favorites", favorite_key(me.id, article.id)) != nil,
+        "favoritesCount": favorites_count(ctx, article),
+        "author": users.profile(ctx, me, author)
+    }
+}
+
+# Ids grow with creation, so they order articles made in the same millisecond.
+fn newest_first(articles) { articles |> sort_by(\a -> 0 - a.id) }
+
+fn page(ctx, conn, me, articles) {
+    let limit = http.int_param(conn, "limit", 20)
+    let offset = http.int_param(conn, "offset", 0)
+    let shown = newest_first(articles) |> skip(offset) |> take(limit)
+    http.ok(conn, {
+        "articles": shown |> map(\a -> article_json(ctx, me, a)),
+        "articlesCount": len(articles)
+    })
+}
+
+pub fn list(ctx, conn, me) {
+    let q = conn.query
+    let author = q.author == nil ? nil : users.by_username(ctx, q.author)
+    let fan = q.favorited == nil ? nil : users.by_username(ctx, q.favorited)
+    let liked = fan == nil ? [] : store_find(ctx.db, "favorites", {"user": fan.id}) |> map(\f -> f.article)
+    let matches = store_all(ctx.db, "articles") |> filter(\a ->
+        (q.tag == nil or contains(a.tagList, q.tag))
+        and (q.author == nil or (author != nil and a.author == author.id))
+        and (q.favorited == nil or contains(liked, a.id)))
+    page(ctx, conn, me, matches)
+}
+
+pub fn feed(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let followed = users.followed_ids(ctx, me)
+    page(ctx, conn, me, store_all(ctx.db, "articles") |> filter(\a -> contains(followed, a.author)))
+}
+
+pub fn show(ctx, conn, me) {
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return http.not_found(conn, "article") }
+    http.ok(conn, {"article": article_json(ctx, me, article)})
+}
+
+fn tags_of(input) {
+    let tags = type_of(input.tagList) == "list" ? input.tagList : []
+    tags |> filter(\t -> type_of(t) == "string" and trim(t) != "") |> map(trim) |> uniq()
+}
+
+pub fn create(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let input = http.payload(conn, "article")
+    if input == nil { return http.bad_payload(conn, "article") }
+    let missing = http.require(input, ["title", "description", "body"])
+    if len(missing) > 0 { return http.invalid(conn, missing) }
+    let id = store_next_id(ctx.db, "articles")
+    let stamp = now()
+    let article = store_put(ctx.db, "articles", id, {
+        "id": id,
+        "slug": unique_slug(ctx, input.title, id),
+        "title": input.title,
+        "description": input.description,
+        "body": input.body,
+        "tagList": tags_of(input),
+        "createdAt": stamp,
+        "updatedAt": stamp,
+        "author": me.id
+    })
+    http.created(conn, {"article": article_json(ctx, me, article)})
+}
+
+# The article at :slug when `me` wrote it, else the error response to send.
+fn owned(ctx, conn, me) {
+    if me == nil { return Err(http.unauthorized(conn)) }
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return Err(http.not_found(conn, "article")) }
+    article.author == me.id ? Ok(article) : Err(http.forbidden(conn))
+}
+
+pub fn update(ctx, conn, me) {
+    match owned(ctx, conn, me) {
+        Err(response) => response
+        Ok(article) => {
+            let input = http.payload(conn, "article")
+            if input == nil { return http.bad_payload(conn, "article") }
+            let blank = ["title", "description", "body"]
+                |> filter(\f -> has_key(input, f) and (type_of(input[f]) != "string" or trim(input[f]) == ""))
+            if len(blank) > 0 { return http.invalid(conn, {f: ["can't be blank"] for f in blank}) }
+            let title = input.title ?: article.title
+            let changed = merge(article, {
+                "title": title,
+                "slug": title == article.title ? article.slug : unique_slug(ctx, title, article.id),
+                "description": input.description ?: article.description,
+                "body": input.body ?: article.body,
+                "tagList": has_key(input, "tagList") ? tags_of(input) : article.tagList,
+                "updatedAt": now()
+            })
+            http.ok(conn, {"article": article_json(ctx, me, store_put(ctx.db, "articles", article.id, changed))})
+        }
+    }
+}
+
+pub fn remove(ctx, conn, me) {
+    match owned(ctx, conn, me) {
+        Err(response) => response
+        Ok(article) => {
+            store_find(ctx.db, "comments", {"article": article.id})
+                |> each(\c -> store_delete(ctx.db, "comments", c.id))
+            store_find(ctx.db, "favorites", {"article": article.id})
+                |> each(\f -> store_delete(ctx.db, "favorites", favorite_key(f.user, f.article)))
+            store_delete(ctx.db, "articles", article.id)
+            json_response(conn, 204, {}) |> put_resp_body("")
+        }
+    }
+}
+
+pub fn favorite(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return http.not_found(conn, "article") }
+    let key = favorite_key(me.id, article.id)
+    if conn.method == "POST" {
+        store_put(ctx.db, "favorites", key, {"user": me.id, "article": article.id})
+    } else {
+        store_delete(ctx.db, "favorites", key)
+    }
+    http.ok(conn, {"article": article_json(ctx, me, article)})
+}
+
+fn comment_json(ctx, me, comment) {
+    {
+        "id": comment.id,
+        "createdAt": iso_time(comment.createdAt),
+        "updatedAt": iso_time(comment.updatedAt),
+        "body": comment.body,
+        "author": users.profile(ctx, me, store_get(ctx.db, "users", comment.author))
+    }
+}
+
+pub fn comments(ctx, conn, me) {
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return http.not_found(conn, "article") }
+    let found = store_find(ctx.db, "comments", {"article": article.id})
+    http.ok(conn, {"comments": found |> reverse() |> map(\c -> comment_json(ctx, me, c))})
+}
+
+pub fn add_comment(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return http.not_found(conn, "article") }
+    let input = http.payload(conn, "comment")
+    if input == nil { return http.bad_payload(conn, "comment") }
+    let missing = http.require(input, ["body"])
+    if len(missing) > 0 { return http.invalid(conn, missing) }
+    let id = store_next_id(ctx.db, "comments")
+    let stamp = now()
+    let comment = store_put(ctx.db, "comments", id, {
+        "id": id, "article": article.id, "author": me.id,
+        "body": input.body, "createdAt": stamp, "updatedAt": stamp
+    })
+    http.created(conn, {"comment": comment_json(ctx, me, comment)})
+}
+
+pub fn delete_comment(ctx, conn, me) {
+    if me == nil { return http.unauthorized(conn) }
+    let article = by_slug(ctx, conn.params.slug)
+    if article == nil { return http.not_found(conn, "article") }
+    let parsed = attempt(\ -> parse_int(conn.params.id), [])
+    let comment = parsed.tag == "Ok" ? store_get(ctx.db, "comments", parsed.value) : nil
+    if comment == nil or comment.article != article.id { return http.not_found(conn, "comment") }
+    if comment.author != me.id { return http.forbidden(conn) }
+    store_delete(ctx.db, "comments", comment.id)
+    json_response(conn, 204, {}) |> put_resp_body("")
+}
+
+pub fn tags(ctx, conn, me) {
+    let all = store_all(ctx.db, "articles") |> flat_map(\a -> a.tagList)
+    let counts = all |> group_by(\t -> t)
+    let popular = keys(counts) |> sort_by(\t -> 0 - len(counts[t]))
+    http.ok(conn, {"tags": popular})
+}

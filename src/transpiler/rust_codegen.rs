@@ -9,6 +9,16 @@ pub struct RustTranspiler {
     bindings: Vec<(String, String)>,
     depth: usize,
     counter: usize,
+    /// The function being emitted, for turning self tail calls into loops.
+    tail: Option<TailTarget>,
+}
+
+/// A self-recursive function whose tail calls jump back to its loop label.
+struct TailTarget {
+    self_var: String,
+    params: Vec<String>,
+    label: String,
+    used: bool,
 }
 impl RustTranspiler {
     pub fn new() -> Self {
@@ -46,10 +56,16 @@ impl RustTranspiler {
         out.push_str(include_str!("../vm/safety.rs"));
         out.push_str("\n} pub mod concurrency {\n");
         out.push_str(include_str!("../vm/concurrency.rs"));
+        out.push_str("\n} pub mod http {\n");
+        out.push_str(include_str!("../vm/http.rs"));
+        out.push_str("\n} pub mod crypto {\n");
+        out.push_str(include_str!("../vm/crypto.rs"));
+        out.push_str("\n} pub mod store {\n");
+        out.push_str(include_str!("../vm/store.rs"));
         out.push_str("\n}}\n");
         out.push_str("use error::{RyndResult, Span};\nuse syntax::ast::{Pattern, Literal, BinaryOp, UnaryOp};\nuse vm::value::Value;\nuse vm::runtime::{self, Runtime};\nuse std::rc::Rc;\nfn rynd_program(__rt: &mut dyn Runtime) -> RyndResult<Value> {\n");
         out.push_str(&self.program_body(program)?);
-        out.push_str("Ok(Value::Nil)\n}\nfn main() {\nlet mut rt = runtime::NativeRuntime::default();\nrt.set_global(\"args\", Value::list(std::env::args().skip(1).map(Value::string).collect()));\nmatch rynd_program(&mut rt) {\nOk(value) => { if value != Value::Nil { println!(\"{}\", value); } },\nErr(error) => { eprintln!(\"Execution Error: {}\", error); std::process::exit(1); }\n}\n}\n");
+        out.push_str("Ok(Value::Nil)\n}\nfn main() {\nvm::safety::run_with_program_stack(|| {\nlet mut rt = runtime::NativeRuntime::default();\nrt.set_global(\"args\", Value::list(std::env::args().skip(1).map(Value::string).collect()));\nmatch rynd_program(&mut rt) {\nOk(value) => { if value != Value::Nil { println!(\"{}\", value); } },\nErr(error) => { eprintln!(\"Execution Error: {}\", error); std::process::exit(1); }\n}\n})\n}\n");
         Ok(out)
     }
     /// Emit a Cargo module using the public Rynd runtime types.
@@ -141,7 +157,7 @@ impl RustTranspiler {
             Stmt::Return { value, .. } => format!(
                 "return Ok({});\n",
                 if let Some(v) = value {
-                    self.transpile_expression(v)?
+                    self.transpile_tail(v)?
                 } else {
                     "Value::Nil".into()
                 }
@@ -164,17 +180,38 @@ impl RustTranspiler {
         self.depth = 1;
         let self_var = self.fresh();
         self.bindings.push((name.into(), self_var.clone()));
-        let mut setup = format!("let {self_var} = __self.clone();\n");
-        for (i, param) in params.iter().enumerate() {
+        let mut param_vars = Vec::new();
+        for param in params {
             let rust = self.fresh();
-            setup.push_str(&format!("let {rust} = __args[{i}].clone();\n"));
-            self.bindings.push((param.clone(), rust));
+            self.bindings.push((param.clone(), rust.clone()));
+            param_vars.push(rust);
         }
-        let body = self.transpile_expression(body)?;
+        let label = self.fresh();
+        let old_tail = self.tail.replace(TailTarget {
+            self_var: self_var.clone(),
+            params: param_vars.clone(),
+            label: label.clone(),
+            used: false,
+        });
+        let body = self.transpile_tail(body);
+        let tail = std::mem::replace(&mut self.tail, old_tail);
+        let body = body?;
         self.bindings = old_bindings;
         self.depth = old_depth;
+        let looped = tail.is_some_and(|t| t.used);
+        let binding = if looped { "let mut" } else { "let" };
+        let mut setup = format!("let {self_var} = __self.clone();\n");
+        for (i, rust) in param_vars.iter().enumerate() {
+            setup.push_str(&format!("{binding} {rust} = __args[{i}].clone();\n"));
+        }
+        let run = if looped {
+            // Self tail calls rebind the parameters and jump back here.
+            format!("'{label}: loop {{ break Ok({body}); }}")
+        } else {
+            format!("Ok({body})")
+        };
         Ok(format!(
-            "{{ {captures} Value::Compiled {{ name: {name:?}.into(), arity: {}, func: Rc::new(move |__rt, __args, __self| {{ {setup} Ok({body}) }}) }} }}",
+            "{{ {captures} Value::Compiled {{ name: {name:?}.into(), arity: {}, func: Rc::new(move |__rt, __args, __self| {{ {setup} {run} }}) }} }}",
             params.len()
         ))
     }
@@ -191,6 +228,138 @@ impl RustTranspiler {
             "{{ let {f} = {callee}; let {a} = [{args}]; {} }}",
             self.checked(expr, format!("__rt.call_ref(&{f}, &{a})"))
         ))
+    }
+    /// The innermost binding of `name` is the function's own self reference.
+    fn is_self(&self, name: &str) -> bool {
+        let Some(tail) = &self.tail else {
+            return false;
+        };
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .is_some_and(|(_, rust)| *rust == tail.self_var)
+    }
+    /// Emit `expr` in tail position: a direct self call becomes a jump.
+    fn transpile_tail(&mut self, expr: &Expr) -> RyndResult<String> {
+        if let Some(lowered) = lower_comprehension(expr) {
+            return self.transpile_tail(&lowered);
+        }
+        let self_call: Option<Vec<&Expr>> = match &expr.kind {
+            ExprKind::Call { callee, args } => match &callee.kind {
+                ExprKind::Identifier(name) if self.is_self(name) => Some(args.iter().collect()),
+                _ => None,
+            },
+            ExprKind::Pipeline { left, right } => match &right.kind {
+                ExprKind::Call { callee, args } => match &callee.kind {
+                    ExprKind::Identifier(name) if self.is_self(name) => {
+                        let mut all = vec![left.as_ref()];
+                        all.extend(args.iter());
+                        Some(all)
+                    }
+                    _ => None,
+                },
+                ExprKind::Identifier(name) if self.is_self(name) => Some(vec![left.as_ref()]),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(args) = self_call
+            && self
+                .tail
+                .as_ref()
+                .is_some_and(|t| t.params.len() == args.len())
+        {
+            let mut code = String::from("{ ");
+            let mut temps = Vec::new();
+            for arg in args {
+                let value = self.transpile_expression(arg)?;
+                let tmp = self.fresh();
+                code.push_str(&format!("let {tmp} = {value}; "));
+                temps.push(tmp);
+            }
+            let tail = self.tail.as_mut().unwrap();
+            tail.used = true;
+            for (param, tmp) in tail.params.iter().zip(temps) {
+                code.push_str(&format!("{param} = {tmp}; "));
+            }
+            code.push_str(&format!("continue '{}; }}", tail.label));
+            return Ok(code);
+        }
+        Ok(match &expr.kind {
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let c = self.transpile_expression(condition)?;
+                let t = self.transpile_tail(then_branch)?;
+                let e = if let Some(e) = else_branch {
+                    self.transpile_tail(e)?
+                } else {
+                    "Value::Nil".into()
+                };
+                format!("if ({c}).is_truthy() {{ {t} }} else {{ {e} }}")
+            }
+            ExprKind::Block {
+                statements,
+                final_expr,
+            } => {
+                let base = self.bindings.len();
+                self.depth += 1;
+                let mut code = String::from("{\n");
+                for stmt in statements {
+                    code.push_str(&self.statement(stmt)?);
+                }
+                code.push_str(&if let Some(e) = final_expr {
+                    self.transpile_tail(e)?
+                } else {
+                    "Value::Nil".into()
+                });
+                code.push_str("\n}");
+                self.bindings.truncate(base);
+                self.depth -= 1;
+                code
+            }
+            ExprKind::Match { target, arms } => self.match_expression(target, arms, true)?,
+            _ => self.transpile_expression(expr)?,
+        })
+    }
+    fn match_expression(
+        &mut self,
+        target: &Expr,
+        arms: &[MatchArm],
+        tail: bool,
+    ) -> RyndResult<String> {
+        let label = self.fresh();
+        let value = self.fresh();
+        let target = self.transpile_expression(target)?;
+        let mut code = format!("'{label}: {{ let {value} = {target};\n");
+        for arm in arms {
+            let base = self.bindings.len();
+            self.depth += 1;
+            let bindings = self.fresh();
+            code.push_str(&format!(
+                "if let Some({bindings}) = runtime::match_pattern(&{}, &{value}) {{\n",
+                pattern_code(&arm.pattern)
+            ));
+            code.push_str(&self.bind_names(pattern_names(&arm.pattern), &bindings));
+            let guard = if let Some(g) = &arm.guard {
+                format!("({}).is_truthy()", self.transpile_expression(g)?)
+            } else {
+                "true".into()
+            };
+            let body = if tail {
+                self.transpile_tail(&arm.body)?
+            } else {
+                self.transpile_expression(&arm.body)?
+            };
+            code.push_str(&format!("if {guard} {{ break '{label} ({body}); }}\n}}\n"));
+            self.bindings.truncate(base);
+            self.depth -= 1;
+        }
+        code.push_str("Value::Nil\n}");
+        Ok(code)
     }
     pub fn transpile_expression(&mut self, expr: &Expr) -> RyndResult<String> {
         if let Some(lowered) = lower_comprehension(expr) {
@@ -340,33 +509,7 @@ impl RustTranspiler {
                 self.depth -= 1;
                 code
             }
-            ExprKind::Match { target, arms } => {
-                let label = self.fresh();
-                let value = self.fresh();
-                let target = self.transpile_expression(target)?;
-                let mut code = format!("'{label}: {{ let {value} = {target};\n");
-                for arm in arms {
-                    let base = self.bindings.len();
-                    self.depth += 1;
-                    let bindings = self.fresh();
-                    code.push_str(&format!(
-                        "if let Some({bindings}) = runtime::match_pattern(&{}, &{value}) {{\n",
-                        pattern_code(&arm.pattern)
-                    ));
-                    code.push_str(&self.bind_names(pattern_names(&arm.pattern), &bindings));
-                    let guard = if let Some(g) = &arm.guard {
-                        format!("({}).is_truthy()", self.transpile_expression(g)?)
-                    } else {
-                        "true".into()
-                    };
-                    let body = self.transpile_expression(&arm.body)?;
-                    code.push_str(&format!("if {guard} {{ break '{label} {body}; }}\n}}\n"));
-                    self.bindings.truncate(base);
-                    self.depth -= 1;
-                }
-                code.push_str("Value::Nil\n}");
-                code
-            }
+            ExprKind::Match { target, arms } => self.match_expression(target, arms, false)?,
             ExprKind::Comprehension { .. } | ExprKind::MapComprehension { .. } => unreachable!(),
         })
     }

@@ -16,17 +16,19 @@ fn test_parse_http_request_get() {
     let code = r#"
         let raw = "GET /users?sort=asc HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\n\r\n"
         let req = parse_http_request(raw)
-        [req.method, req.path, req.version, req.headers.host, req.body]
+        [req.method, req.path, req.version, req.headers.host, req.body, req.query.sort, req.query_string]
     "#;
     let res = engine.eval(code).expect("Eval failed");
     assert_eq!(
         res,
         Value::list(vec![
             Value::string("GET"),
-            Value::string("/users?sort=asc"),
+            Value::string("/users"),
             Value::string("HTTP/1.1"),
             Value::string("example.com"),
             Value::string(""),
+            Value::string("asc"),
+            Value::string("sort=asc"),
         ])
     );
 }

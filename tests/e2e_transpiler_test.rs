@@ -663,7 +663,7 @@ fn regression_integer_min_scientific_and_inclusive_max() {
 
 #[test]
 fn regression_recursion_limit_reports_error() {
-    verify("recursion_limit", "fn f() { f() } f()", None, true);
+    verify("recursion_limit", "fn f() { 1 + f() } f()", None, true);
 }
 
 #[test]
