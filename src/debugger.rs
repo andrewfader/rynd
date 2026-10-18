@@ -37,10 +37,12 @@ impl Machine {
             frame.ip.saturating_sub(1)
         };
         let mut values = BTreeMap::new();
-        if let Value::Closure { name, upvalues, .. } = &frame.callee {
+        let callee = self.frame_callee(frame);
+        if let Value::Closure(closure) = callee {
+            let (name, upvalues) = (&closure.name, &closure.upvalues);
             values.insert(
                 name.rsplit("::").next().unwrap_or(name).to_string(),
-                frame.callee.clone(),
+                callee.clone(),
             );
             for (name, value) in symbols
                 .into_iter()
@@ -51,7 +53,7 @@ impl Machine {
             }
         }
         if let Some(names) = symbols.and_then(|s| s.locals.get(ip)) {
-            for (name, value) in names.iter().zip(&frame.locals) {
+            for (name, value) in names.iter().zip(self.frame_locals(frame)) {
                 values.insert(name.clone(), value.clone());
             }
         }
@@ -81,11 +83,11 @@ impl Machine {
             .globals
             .iter()
             .filter(|(name, _)| !name.starts_with("@module:"))
-            .map(|(name, value)| (name.clone(), value.clone()))
+            .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         if let Some(file) = self.debug_span(selected)?.file {
             let prefix = format!("@module:{file}::");
-            for (name, value) in &self.globals {
+            for (name, value) in self.globals.iter() {
                 if let Some(name) = name.strip_prefix(&prefix) {
                     values.insert(name.into(), value.clone());
                 }
@@ -99,13 +101,13 @@ impl Machine {
         let mut output = String::new();
         let result = (|| {
             let program = Parser::new(Lexer::new(source).tokenize()?).parse()?;
-            let mut machine = Machine::new(self.chunks.clone());
+            let mut machine = Machine::with_chunks(self.chunks.clone());
             machine.globals = self.globals.clone();
             machine.globals.extend(self.debug_globals(selected)?);
             machine.globals.extend(self.debug_bindings(selected)?);
             let entry = machine.chunks.len();
             machine
-                .chunks
+                .chunks_mut()
                 .extend(Compiler::with_offset(entry).compile(&program)?);
             machine.enable_output_capture();
             let result = machine.run_from(entry);
@@ -281,7 +283,7 @@ impl<R: BufRead, W: Write> DebugSession<R, W> {
                 }
                 "bt" | "where" => {
                     for (index, frame) in machine.frames.iter().rev().enumerate() {
-                        self.say(format!("#{index} {} at {}", frame.callee, machine.debug_span(index)?))?;
+                        self.say(format!("#{index} {} at {}", machine.frame_callee(frame), machine.debug_span(index)?))?;
                     }
                 }
                 "frame" => match rest.parse::<usize>() {

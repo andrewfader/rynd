@@ -190,7 +190,7 @@ pub fn run(mut args: Vec<String>, setup: Setup) -> Result<(), String> {
             machine.debug_symbols = symbols;
             machine.globals.extend(engine(setup).machine.globals);
             machine.globals.insert(
-                "args".into(),
+                "args",
                 Value::from(args.get(3..).unwrap_or_default().to_vec()),
             );
             let interactive = io::stdin().is_terminal();

@@ -133,9 +133,9 @@ impl<T: FromValue> FromValue for Option<T> {
     fn from_value(value: &Value) -> RyndResult<Self> {
         match value {
             Value::Nil => Ok(None),
-            Value::Variant { name, values } if name == "None" && values.is_empty() => Ok(None),
-            Value::Variant { name, values } if name == "Some" && values.len() == 1 => {
-                T::from_value(&values[0]).map(Some)
+            Value::Variant(v) if &*v.name == "None" && v.values.is_empty() => Ok(None),
+            Value::Variant(v) if &*v.name == "Some" && v.values.len() == 1 => {
+                T::from_value(&v.values[0]).map(Some)
             }
             other => T::from_value(other).map(Some),
         }

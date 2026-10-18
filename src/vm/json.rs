@@ -215,7 +215,7 @@ impl Parser<'_> {
 
 pub fn stringify(value: &Value) -> RyndResult<String> {
     let mut out = String::new();
-    encode(value, &mut out, 0)?;
+    encode(value, &mut out, 0, super::safety::string_cap())?;
     Ok(out)
 }
 
@@ -239,9 +239,14 @@ fn quote(text: &str, out: &mut String) {
     out.push('"');
 }
 
-fn encode(value: &Value, out: &mut String, depth: usize) -> RyndResult<()> {
+/// Encode `value`, stopping once the output passes `cap` bytes (a small
+/// value sharing one large list many times can expand enormously).
+fn encode(value: &Value, out: &mut String, depth: usize, cap: usize) -> RyndResult<()> {
     if matches!(value, Value::List(_) | Value::Map(_)) && depth >= MAX_DEPTH {
         return Err(error("to_json(): Nesting exceeds 128 containers"));
+    }
+    if out.len() > cap {
+        super::safety::reserve_string(out.len())?;
     }
     match value {
         Value::Nil => out.push_str("null"),
@@ -258,7 +263,7 @@ fn encode(value: &Value, out: &mut String, depth: usize) -> RyndResult<()> {
                 if i > 0 {
                     out.push(',');
                 }
-                encode(item, out, depth + 1)?;
+                encode(item, out, depth + 1, cap)?;
             }
             out.push(']');
         }
@@ -270,7 +275,7 @@ fn encode(value: &Value, out: &mut String, depth: usize) -> RyndResult<()> {
                 }
                 quote(key, out);
                 out.push(':');
-                encode(value, out, depth + 1)?;
+                encode(value, out, depth + 1, cap)?;
             }
             out.push('}');
         }

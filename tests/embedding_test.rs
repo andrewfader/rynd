@@ -39,7 +39,7 @@ fn package_reload_keeps_other_scripts_and_old_closures_valid() {
         engine.call("fresh", &[Value::Int(2)]).unwrap(),
         Value::Int(20)
     );
-    assert!(matches!(old_closure, Value::Closure { .. }));
+    assert!(matches!(old_closure, Value::Closure(_)));
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn tools_render_ast_and_bytecode() {
     assert!(rynd::tools::print_ast("fn (").starts_with("parse error"));
     let dump = rynd::tools::print_bytecode("1 + 2");
     assert!(
-        dump.contains("chunk 0000") && dump.contains("Binary(Add)"),
+        dump.contains("chunk 0000") && dump.contains("Add"),
         "{dump}"
     );
     assert!(rynd::tools::print_bytecode("fn (").is_empty());

@@ -165,7 +165,10 @@ Embedding building blocks:
   `engine.filtermap(name, args)` yields `(Verdict, payload)`. `Reject` is falsey
   and `filter_map` keeps accepted payloads.
 - `RyndEngine::sandboxed()` drops file, process, environment, and network
-  builtins; see [SECURITY.md](SECURITY.md).
+  builtins and applies `Limits::sandbox()` to every run;
+  `engine.set_limits(Limits { .. })` limits any engine, and
+  `engine.interrupt_handle()` stops a run from another thread. See
+  [SECURITY.md](SECURITY.md).
 - `rynd::cli::main_with(|engine| ...)` ships the whole `rynd` CLI (run, eval,
   lines, repl, debug) from your binary with your functions preinstalled.
 - `rynd::tools::print_ast` / `print_bytecode` and `has_main_function` inspect
@@ -194,11 +197,13 @@ lockfiles/profiles govern dependencies and release builds.
 
 Collections and input helpers materialize in memory. Values use `Rc`; create an
 independent runtime per thread or convert values to Rust data for transfer.
-Fibers are the exception: each runs on its own thread, and the scheduler
-hands values between them one thread at a time. Script call depth is bounded
-at 10,000 nested calls; tail calls do not count. Scripts and native adapters execute with
-normal process authority; `RyndEngine::sandboxed()` removes host-access builtins
-for less-trusted scripts (see [SECURITY.md](SECURITY.md)).
+Fibers stay on the thread that started them, so script values never cross
+threads. Script call depth is bounded at 10,000 nested calls; tail calls do not
+count. Source nesting is bounded at 200 levels, and deeply nested values drop,
+print, and compare without recursing on the native stack. Scripts and native
+adapters execute with normal process authority; `RyndEngine::sandboxed()`
+removes host-access builtins and limits each run for less-trusted scripts (see
+[SECURITY.md](SECURITY.md)).
 
 See [README.md](README.md) for executable workflows and verification, and
 [BENCHMARKS.md](BENCHMARKS.md) for measured performance.
@@ -299,15 +304,18 @@ println(call_method(updated, "summary", [])) # Balance: 150
 
 ## Fibers, nurseries, actors, and channels
 
-A fiber is a function running on its own stack. Each fiber gets an OS thread,
-and a baton makes them take turns: one fiber per program runs Rynd code at a
-time, switching at `yield_fiber`, `await_fiber`, `receive`, `channel_recv`,
-nursery joins, `sleep_ms`, and blocking I/O (sockets, HTTP, processes, stdin).
-Blocking I/O releases the baton for its whole duration, so a thousand fibers
-waiting on a thousand sockets cost a thousand parked threads, not a stalled
-program. Between switch points a fiber runs uninterrupted, so a
+A fiber is a function running on its own stack: a coroutine on the thread
+that runs the program. One fiber runs at a time, switching at `yield_fiber`,
+`await_fiber`, `receive`, `channel_recv`, nursery joins, `sleep_ms`, and I/O.
+Sockets and HTTP wait in one `poll` loop, so ten thousand fibers waiting on
+ten thousand sockets cost ten thousand small stacks, not threads. Name
+resolution, `run_process`, and `read_stdin` run on a helper thread while their
+fiber waits. Between switch points a fiber runs uninterrupted, so a
 read-check-write sequence without I/O is atomic. CPU-bound loops do not
-preempt; call `yield_fiber()` to share.
+preempt; call `yield_fiber()` to share. Fiber stacks reserve address space
+lazily, so recursion inside a fiber reaches the same depth limit as anywhere
+else. Fibers need x86-64 or AArch64 on Linux or macOS; elsewhere `spawn`
+reports an error.
 
 | Function | Behavior |
 | --- | --- |
@@ -324,8 +332,8 @@ preempt; call `yield_fiber()` to share.
 | `channel_send(tx, value)`, `channel_recv(rx)`, `channel_try_recv(rx)` | Send; wait for a value; or take one if present (`Some`/`None`). |
 | `close_channel(side)`, `is_channel_closed(side)` | Closing either side drops pending values and wakes blocked receivers with an error. |
 
-Cancellation takes effect at the child's next switch point (sleeps end early);
-a cancelled child reports `Fiber cancelled`. A wait that nothing could ever
+Cancellation takes effect at the child's next switch point (sleeps and socket
+waits end early); a cancelled child reports `Fiber cancelled`. A wait that nothing could ever
 satisfy, such as `receive` on an empty mailbox with no other runnable fiber,
 raises a `Deadlock` error instead of hanging. Engines on different OS threads
 schedule independently.

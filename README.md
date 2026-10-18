@@ -55,10 +55,12 @@ include introspection, history, and expression benchmarks.
 
 ## Concurrency and web services
 
-Fibers get real stacks and take turns on a baton: blocking I/O hands it off,
-so one slow client never stalls the rest. Nurseries cancel siblings on the
-first failure, actors own mailboxes, channels block until fed, and a wait that
-can never finish is reported as a deadlock instead of a hang:
+Fibers are stackful coroutines on one thread: a couple of microseconds to
+start, a fraction of one to switch, and ten thousand at once is routine.
+Sockets wait in a single `poll` loop, so one slow client never stalls the rest.
+Nurseries cancel siblings on the first failure (even mid-read), actors own
+mailboxes, channels block until fed, and a wait that can never finish is
+reported as a deadlock instead of a hang:
 
 ```rynd
 let results = nursery(\n -> {
@@ -142,7 +144,9 @@ rynd::record! { pub struct Order { pub id: i64, pub total: f64 } } // derive, no
 
 Bundle host APIs in a `Library`, hot-reload rules with `Package::reload`, resolve
 imports from an in-memory `SourceTree`, return `Accept(x)`/`Reject(x)` from
-filter-map scripts, and hand less-trusted code a `RyndEngine::sandboxed()`.
+filter-map scripts, and hand less-trusted code a `RyndEngine::sandboxed()`:
+no host access, and per-run limits on work, time, memory, sizes, depth, and
+fibers that scripts cannot catch, plus an `Interrupt` handle for watchdogs.
 `rynd::cli::main_with(|engine| ...)` ships the whole CLI with your functions
 built in. Need integer hot loops at machine speed? `--features jit` and
 `engine.enable_jit()`: Cranelift compiles what it can prove, the VM runs the rest.

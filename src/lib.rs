@@ -21,6 +21,7 @@ pub use transpiler::RustTranspiler;
 pub use verdict::Verdict;
 pub use vm::machine::Machine;
 pub use vm::runtime::{NativeRuntime, Runtime};
+pub use vm::safety::{Interrupt, Limits};
 pub use vm::value::Value;
 
 use std::collections::HashMap;
@@ -172,6 +173,8 @@ pub struct RyndEngine {
     callbacks: HashMap<String, Value>,
     session: Rc<()>,
     sandboxed: bool,
+    limits: Limits,
+    interrupt: Option<Interrupt>,
     #[cfg(feature = "jit")]
     jit: Option<jit::JitState>,
 }
@@ -183,32 +186,61 @@ impl RyndEngine {
             callbacks: HashMap::new(),
             session: Rc::new(()),
             sandboxed: false,
+            limits: Limits::none(),
+            interrupt: None,
             #[cfg(feature = "jit")]
             jit: None,
         }
     }
 
-    /// An engine without builtins that touch files, stdin, the environment,
-    /// processes, sleeping, or the network (see
-    /// [`vm::safety::HOST_ACCESS_BUILTINS`]). Scripts can still reach
-    /// whatever host functions you register. The restriction survives
-    /// [`RyndEngine::reset`].
+    /// An engine for untrusted scripts: no builtins that touch files,
+    /// stdin, the environment, processes, sleeping, or the network (see
+    /// [`vm::safety::HOST_ACCESS_BUILTINS`]), and [`Limits::sandbox`] on
+    /// every run (operations, time, allocation, sizes, depth, fibers).
+    /// Scripts can still reach whatever host functions you register. Both
+    /// restrictions survive [`RyndEngine::reset`]; adjust the limits with
+    /// [`RyndEngine::set_limits`].
     ///
     /// ```
     /// let mut engine = rynd::RyndEngine::sandboxed();
     /// assert!(engine.eval("read_text('/etc/passwd')").is_err());
     /// assert_eq!(engine.eval("upper('ok')").unwrap().to_string(), "OK");
+    /// let spin = engine.eval("fn spin(n) { spin(n + 1) } spin(0)").unwrap_err();
+    /// assert!(spin.is_limit());
     /// ```
     pub fn sandboxed() -> Self {
         let mut engine = Self::new();
         engine.sandboxed = true;
+        engine.limits = Limits::sandbox();
         engine.remove_host_access();
         engine
     }
 
+    /// Limit every later run (`eval`, `run`, `call`, ...) of this engine.
+    /// Each run gets a fresh budget. [`Limits::none`] removes the limits.
+    /// The optional `jit` feature does not compile code for limited engines.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// A handle another thread can use to stop this engine's current and
+    /// future runs (until [`Interrupt::reset`]).
+    pub fn interrupt_handle(&mut self) -> Interrupt {
+        self.interrupt.get_or_insert_with(Interrupt::new).clone()
+    }
+
+    /// Enter this engine's budget for the duration of one run.
+    fn budget(&self) -> vm::safety::BudgetScope {
+        vm::safety::enter(&self.limits, self.interrupt.clone())
+    }
+
     fn remove_host_access(&mut self) {
         for name in vm::safety::HOST_ACCESS_BUILTINS {
-            self.machine.globals.remove(*name);
+            self.machine.globals.remove(name);
         }
     }
 
@@ -232,6 +264,7 @@ impl RyndEngine {
     }
 
     pub fn compile(&mut self, source: &str) -> RyndResult<CompiledScript> {
+        self.check_source(source.len())?;
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize()?;
         let mut parser = Parser::new(tokens);
@@ -262,14 +295,26 @@ impl RyndEngine {
         self.run(&script)
     }
 
+    fn check_source(&self, bytes: usize) -> RyndResult<()> {
+        match self.limits.source_bytes {
+            Some(max) if bytes > max => Err(RyndError::LimitExceeded {
+                message: format!("source size ({max} bytes)"),
+            }),
+            _ => Ok(()),
+        }
+    }
+
     fn compile_program(&mut self, program: &Program) -> RyndResult<CompiledScript> {
         let entry = self.machine.chunks.len();
         let compiler = Compiler::with_offset(entry);
         let chunks = compiler.compile(program)?;
 
-        self.machine.chunks.extend(chunks);
+        self.machine.chunks_mut().extend(chunks);
+        // Native code would run outside the budget's checks.
         #[cfg(feature = "jit")]
-        self.jit_program(entry, program);
+        if self.limits.is_unlimited() {
+            self.jit_program(entry, program);
+        }
         Ok(CompiledScript {
             entry,
             session: self.session.clone(),
@@ -282,6 +327,7 @@ impl RyndEngine {
                 "Compiled script belongs to another engine or an expired session",
             ));
         }
+        let _budget = self.budget();
         let result = self.machine.run_from(script.entry);
         if result.is_err() {
             self.machine.stack.clear();
@@ -312,7 +358,7 @@ impl RyndEngine {
         self.machine
             .globals
             .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
+            .map(|(name, value)| (name.to_string(), value.clone()))
             .collect()
     }
 
@@ -320,6 +366,7 @@ impl RyndEngine {
     /// Execution errors leave the engine ready for another call.
     pub fn call(&mut self, name: &str, args: &[Value]) -> RyndResult<Value> {
         let callee = self.machine.get_global(name)?;
+        let _budget = self.budget();
         let result = self.machine.call_ref(&callee, args);
         self.machine.stack.clear();
         self.machine.frames.clear();
@@ -396,11 +443,7 @@ impl RyndEngine {
     where
         F: Fn(&[Value]) -> RyndResult<Value> + 'static,
     {
-        let value = Value::Compiled {
-            name: name.into(),
-            arity,
-            func: Rc::new(move |_, args, _| func(args)),
-        };
+        let value = Value::compiled(name, arity, move |_, args, _| func(args));
         self.callbacks.insert(name.into(), value.clone());
         self.machine.set_global(name, value);
     }
@@ -490,7 +533,7 @@ pub mod tools {
                 chunk.code.len()
             ));
             for (ip, op) in chunk.code.iter().enumerate() {
-                out.push_str(&format!("{ip:04}  {op:?}\n"));
+                out.push_str(&format!("{ip:04}  {}\n", chunk.describe(op)));
             }
         }
         out

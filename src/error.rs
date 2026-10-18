@@ -32,13 +32,33 @@ impl fmt::Display for Span {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RyndError {
-    Located { span: Span, source: Box<RyndError> },
-    LexError { message: String, span: Span },
-    ParseError { message: String, span: Span },
-    CompileError { message: String },
-    RuntimeError { message: String },
-    TranspileError { message: String },
+    Located {
+        span: Span,
+        source: Box<RyndError>,
+    },
+    LexError {
+        message: String,
+        span: Span,
+    },
+    ParseError {
+        message: String,
+        span: Span,
+    },
+    CompileError {
+        message: String,
+    },
+    RuntimeError {
+        message: String,
+    },
+    TranspileError {
+        message: String,
+    },
     IoError(String),
+    /// A resource limit stopped the run (see `vm::safety::Limits`). Scripts
+    /// cannot recover from it with `attempt`.
+    LimitExceeded {
+        message: String,
+    },
 }
 
 impl fmt::Display for RyndError {
@@ -61,6 +81,7 @@ impl fmt::Display for RyndError {
                 write!(f, "Transpile error: {message}")
             }
             RyndError::IoError(msg) => write!(f, "IO error: {msg}"),
+            RyndError::LimitExceeded { message } => write!(f, "Limit exceeded: {message}"),
         }
     }
 }
@@ -68,6 +89,14 @@ impl fmt::Display for RyndError {
 impl std::error::Error for RyndError {}
 
 impl RyndError {
+    /// Whether a resource limit caused this error.
+    pub fn is_limit(&self) -> bool {
+        match self {
+            Self::Located { source, .. } => source.is_limit(),
+            Self::LimitExceeded { .. } => true,
+            _ => false,
+        }
+    }
     pub fn with_file(mut self, file: impl Into<std::rc::Rc<str>>) -> Self {
         match &mut self {
             Self::Located { span, .. }

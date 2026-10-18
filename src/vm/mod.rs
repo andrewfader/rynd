@@ -3,6 +3,7 @@ pub mod collections;
 pub mod compiler;
 pub mod concurrency;
 pub mod crypto;
+pub mod fiber;
 pub mod http;
 pub mod json;
 pub mod machine;

@@ -1,9 +1,10 @@
-use super::opcode::{Chunk, DebugSymbols, OpCode};
+use super::opcode::{Chunk, Cmp, DebugSymbols, OpCode};
 use super::runtime::{literal, pattern_names};
 use super::value::Value;
 use crate::error::{RyndError, RyndResult, Span};
 use crate::syntax::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 #[derive(Clone)]
 struct Local {
@@ -22,6 +23,8 @@ pub struct Compiler {
     span: Span,
     debug: bool,
     debug_symbols: Vec<DebugSymbols>,
+    /// Per-chunk interning of `Chunk::names`.
+    name_index: Vec<HashMap<Rc<str>, u32>>,
 }
 
 impl Default for Compiler {
@@ -45,6 +48,7 @@ impl Compiler {
             span: Span::new(1, 1),
             debug: false,
             debug_symbols: Vec::new(),
+            name_index: vec![HashMap::new()],
         }
     }
     pub fn compile_debug(
@@ -83,16 +87,71 @@ impl Compiler {
         self.chunk().write_op(op, span.line)
     }
     fn constant(&mut self, value: Value) {
+        if let Value::Int(n) = value
+            && let Ok(n) = i32::try_from(n)
+        {
+            self.emit(OpCode::Int(n));
+            return;
+        }
         let idx = self.chunk().add_constant(value);
-        self.emit(OpCode::Constant(idx));
+        self.emit(OpCode::Constant(idx as u32));
+    }
+    /// Compile a condition and a jump taken when it is falsy, fusing
+    /// comparisons into the jump. Returns the jump to patch.
+    fn condition_jump(&mut self, condition: &Expr) -> RyndResult<usize> {
+        if let ExprKind::Binary { op, left, right } = &condition.kind
+            && let Some(cmp) = comparison(op)
+        {
+            let old_span = std::mem::replace(&mut self.span, condition.span.clone());
+            self.compile_expression(left)?;
+            let jump = if let Some(imm) = small_int(right) {
+                self.emit(OpCode::JumpUnlessImm {
+                    cmp,
+                    imm,
+                    target: 0,
+                })
+            } else {
+                self.compile_expression(right)?;
+                self.emit(OpCode::JumpUnless { cmp, target: 0 })
+            };
+            self.span = old_span;
+            return Ok(jump);
+        }
+        self.compile_expression(condition)?;
+        Ok(self.emit(OpCode::PopJumpIfFalse(0)))
+    }
+    /// Intern `name` in the current chunk's name table.
+    fn name(&mut self, name: &str) -> u32 {
+        if let Some(&index) = self.name_index[self.current_chunk].get(name) {
+            return index;
+        }
+        let name: Rc<str> = name.into();
+        let index = self.chunk().names.len() as u32;
+        self.chunk().names.push(name.clone());
+        self.name_index[self.current_chunk].insert(name, index);
+        index
+    }
+    fn pattern(&mut self, pattern: &Pattern) -> u32 {
+        let index = self.chunk().patterns.len() as u32;
+        self.chunk().patterns.push(Rc::new(pattern.clone()));
+        index
+    }
+    /// Record that the current chunk's frames need room for every live local.
+    fn reserve_locals(&mut self) {
+        let count = self.locals.len() as u32;
+        let chunk = self.chunk();
+        chunk.max_locals = chunk.max_locals.max(count);
     }
     fn patch(&mut self, offset: usize) {
-        let end = self.chunk().code.len();
+        let end = self.chunk().code.len() as u32;
         match &mut self.chunk().code[offset] {
             OpCode::Jump(n)
             | OpCode::JumpIfFalse(n)
             | OpCode::JumpIfTrue(n)
-            | OpCode::ElvisJump(n) => *n = end,
+            | OpCode::PopJumpIfFalse(n)
+            | OpCode::ElvisJump(n)
+            | OpCode::JumpUnless { target: n, .. }
+            | OpCode::JumpUnlessImm { target: n, .. } => *n = end,
             OpCode::MatchPattern { fail, .. } => *fail = end,
             _ => unreachable!(),
         }
@@ -103,17 +162,17 @@ impl Compiler {
     fn end_scope(&mut self) {
         self.scope_depth -= 1;
         self.locals.retain(|v| v.depth <= self.scope_depth);
-        self.emit(OpCode::TruncateLocals(self.locals.len()));
+        self.emit(OpCode::TruncateLocals(self.locals.len() as u32));
     }
-    fn lookup(&self, name: &str) -> OpCode {
+    fn lookup(&mut self, name: &str) -> OpCode {
         if let Some(i) = self.locals.iter().rposition(|v| v.name == name) {
-            OpCode::GetLocal(i)
+            OpCode::GetLocal(i as u32)
         } else if self.self_name.as_deref() == Some(name) {
             OpCode::GetSelf
         } else if let Some(i) = self.upvalues.iter().position(|v| v == name) {
-            OpCode::GetUpvalue(i)
+            OpCode::GetUpvalue(i as u32)
         } else {
-            OpCode::GetGlobal(name.into())
+            OpCode::GetGlobal(self.name(name))
         }
     }
     fn fail(&self, message: impl Into<String>) -> RyndError {
@@ -128,14 +187,16 @@ impl Compiler {
         if unique.len() != names.len() {
             return Err(self.fail("Duplicate variable in pattern"));
         }
-        self.emit(OpCode::BindPattern(std::rc::Rc::new(pattern.clone())));
+        let pattern = self.pattern(pattern);
+        self.emit(OpCode::BindPattern(pattern));
         self.bind_names(names);
         Ok(())
     }
     fn bind_names(&mut self, names: Vec<String>) {
         if self.scope_depth == 0 {
             for name in names.into_iter().rev() {
-                self.emit(OpCode::DefineGlobal(name.into()));
+                let name = self.name(&name);
+                self.emit(OpCode::DefineGlobal(name));
             }
         } else {
             let base = self.locals.len();
@@ -145,8 +206,9 @@ impl Compiler {
                     depth: self.scope_depth,
                 });
             }
+            self.reserve_locals();
             for idx in (base..self.locals.len()).rev() {
-                self.emit(OpCode::DefineLocal(idx));
+                self.emit(OpCode::DefineLocal(idx as u32));
             }
         }
     }
@@ -226,6 +288,7 @@ impl Compiler {
         let needed = crate::syntax::captures::free_names(name, params, body);
         names.retain(|name| needed.contains(name));
         let captures: Vec<_> = names.iter().map(|name| self.lookup(name)).collect();
+        let name_slot = self.name(name);
         let old_chunk = self.current_chunk;
         let old_locals = std::mem::take(&mut self.locals);
         let old_upvalues = std::mem::replace(&mut self.upvalues, names);
@@ -233,6 +296,7 @@ impl Compiler {
         let old_self = self.self_name.take();
         let old_span = self.span.clone();
         self.chunks.push(Chunk::new());
+        self.name_index.push(HashMap::new());
         self.current_chunk = self.chunks.len() - 1;
         if self.debug {
             self.debug_symbols.push(DebugSymbols {
@@ -250,6 +314,7 @@ impl Compiler {
                 depth: 1,
             })
             .collect();
+        self.reserve_locals();
         self.compile_expression(body)?;
         self.emit(OpCode::Return);
         if !self.debug {
@@ -263,13 +328,13 @@ impl Compiler {
         self.self_name = old_self;
         self.span = old_span;
         for op in &captures {
-            self.emit(op.clone());
+            self.emit(*op);
         }
         self.emit(OpCode::MakeClosure {
-            name: name.into(),
-            arity: params.len(),
-            chunk_index,
-            captures: captures.len(),
+            name: name_slot,
+            arity: params.len() as u32,
+            chunk_index: chunk_index as u32,
+            captures: captures.len() as u32,
         });
         Ok(())
     }
@@ -283,7 +348,8 @@ impl Compiler {
         match &expr.kind {
             ExprKind::Literal(lit) => self.constant(literal(lit)),
             ExprKind::Identifier(name) => {
-                self.emit(self.lookup(name));
+                let op = self.lookup(name);
+                self.emit(op);
             }
             ExprKind::Binary { op, left, right } => {
                 self.compile_expression(left)?;
@@ -299,14 +365,21 @@ impl Compiler {
                         self.patch(jump);
                     }
                     _ => {
-                        self.compile_expression(right)?;
-                        self.emit(OpCode::Binary(op.clone()));
+                        if let Some(imm) = small_int(right) {
+                            self.emit(binary_imm(op, imm));
+                        } else {
+                            self.compile_expression(right)?;
+                            self.emit(binary_op(op));
+                        }
                     }
                 }
             }
             ExprKind::Unary { op, operand } => {
                 self.compile_expression(operand)?;
-                self.emit(OpCode::Unary(op.clone()));
+                self.emit(match op {
+                    UnaryOp::Not => OpCode::Not,
+                    UnaryOp::Neg => OpCode::Neg,
+                });
             }
             ExprKind::Pipeline { left, right } => {
                 if let ExprKind::Call { callee, args } = &right.kind {
@@ -315,7 +388,7 @@ impl Compiler {
                     for a in args {
                         self.compile_expression(a)?;
                     }
-                    self.emit(OpCode::Call(args.len() + 1));
+                    self.emit(OpCode::Call(args.len() as u32 + 1));
                 } else {
                     self.compile_expression(right)?;
                     self.compile_expression(left)?;
@@ -327,7 +400,7 @@ impl Compiler {
                 for a in args {
                     self.compile_expression(a)?;
                 }
-                self.emit(OpCode::Call(args.len()));
+                self.emit(OpCode::Call(args.len() as u32));
             }
             ExprKind::Lambda { params, body } => self.function("<lambda>", params, body)?,
             ExprKind::List(items) | ExprKind::Tuple(items) => {
@@ -335,9 +408,9 @@ impl Compiler {
                     self.compile_expression(item)?;
                 }
                 self.emit(if matches!(expr.kind, ExprKind::List(_)) {
-                    OpCode::MakeList(items.len())
+                    OpCode::MakeList(items.len() as u32)
                 } else {
-                    OpCode::MakeTuple(items.len())
+                    OpCode::MakeTuple(items.len() as u32)
                 });
             }
             ExprKind::Map(pairs) => {
@@ -345,7 +418,7 @@ impl Compiler {
                     self.compile_expression(k)?;
                     self.compile_expression(v)?;
                 }
-                self.emit(OpCode::MakeMap(pairs.len()));
+                self.emit(OpCode::MakeMap(pairs.len() as u32));
             }
             ExprKind::Index { target, index } => {
                 self.compile_expression(target)?;
@@ -355,10 +428,11 @@ impl Compiler {
             ExprKind::FieldAccess { target, field }
             | ExprKind::SafeFieldAccess { target, field } => {
                 self.compile_expression(target)?;
+                let field = self.name(field);
                 self.emit(if matches!(expr.kind, ExprKind::SafeFieldAccess { .. }) {
-                    OpCode::SafeGetField(field.as_str().into())
+                    OpCode::SafeGetField(field)
                 } else {
-                    OpCode::GetField(field.as_str().into())
+                    OpCode::GetField(field)
                 });
             }
             ExprKind::Elvis { left, right } => {
@@ -382,13 +456,10 @@ impl Compiler {
                 then_branch,
                 else_branch,
             } => {
-                self.compile_expression(condition)?;
-                let fail = self.emit(OpCode::JumpIfFalse(0));
-                self.emit(OpCode::Pop);
+                let fail = self.condition_jump(condition)?;
                 self.compile_expression(then_branch)?;
                 let end = self.emit(OpCode::Jump(0));
                 self.patch(fail);
-                self.emit(OpCode::Pop);
                 if let Some(other) = else_branch {
                     self.compile_expression(other)?;
                 } else {
@@ -423,29 +494,23 @@ impl Compiler {
                     if names.iter().collect::<HashSet<_>>().len() != names.len() {
                         return Err(self.fail("Duplicate variable in pattern"));
                     }
-                    self.emit(OpCode::GetLocal(slot));
-                    let miss = self.emit(OpCode::MatchPattern {
-                        pattern: std::rc::Rc::new(arm.pattern.clone()),
-                        fail: 0,
-                    });
+                    self.emit(OpCode::GetLocal(slot as u32));
+                    let pattern = self.pattern(&arm.pattern);
+                    let miss = self.emit(OpCode::MatchPattern { pattern, fail: 0 });
                     self.bind_names(names);
                     let guard = if let Some(g) = &arm.guard {
-                        self.compile_expression(g)?;
-                        let g = self.emit(OpCode::JumpIfFalse(0));
-                        self.emit(OpCode::Pop);
-                        Some(g)
+                        Some(self.condition_jump(g)?)
                     } else {
                         None
                     };
                     self.compile_expression(&arm.body)?;
-                    self.emit(OpCode::TruncateLocals(base));
+                    self.emit(OpCode::TruncateLocals(base as u32));
                     exits.push(self.emit(OpCode::Jump(0)));
                     if let Some(g) = guard {
                         self.patch(g);
-                        self.emit(OpCode::Pop);
                     }
                     self.patch(miss);
-                    self.emit(OpCode::TruncateLocals(base));
+                    self.emit(OpCode::TruncateLocals(base as u32));
                     self.locals.truncate(base);
                 }
                 self.emit(OpCode::Nil);
@@ -458,6 +523,61 @@ impl Compiler {
         }
         self.span = old_span;
         Ok(())
+    }
+}
+
+/// An integer literal that fits an instruction immediate.
+fn small_int(expr: &Expr) -> Option<i32> {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Int(n)) => i32::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+fn comparison(op: &BinaryOp) -> Option<Cmp> {
+    Some(match op {
+        BinaryOp::Equal => Cmp::Equal,
+        BinaryOp::NotEqual => Cmp::NotEqual,
+        BinaryOp::Less => Cmp::Less,
+        BinaryOp::LessEqual => Cmp::LessEqual,
+        BinaryOp::Greater => Cmp::Greater,
+        BinaryOp::GreaterEqual => Cmp::GreaterEqual,
+        _ => return None,
+    })
+}
+
+fn binary_imm(op: &BinaryOp, imm: i32) -> OpCode {
+    match op {
+        BinaryOp::Add => OpCode::AddImm(imm),
+        BinaryOp::Sub => OpCode::SubImm(imm),
+        BinaryOp::Mul => OpCode::MulImm(imm),
+        BinaryOp::Div => OpCode::DivImm(imm),
+        BinaryOp::Mod => OpCode::ModImm(imm),
+        BinaryOp::Equal => OpCode::EqualImm(imm),
+        BinaryOp::NotEqual => OpCode::NotEqualImm(imm),
+        BinaryOp::Less => OpCode::LessImm(imm),
+        BinaryOp::LessEqual => OpCode::LessEqualImm(imm),
+        BinaryOp::Greater => OpCode::GreaterImm(imm),
+        BinaryOp::GreaterEqual => OpCode::GreaterEqualImm(imm),
+        BinaryOp::And | BinaryOp::Or => unreachable!(),
+    }
+}
+
+fn binary_op(op: &BinaryOp) -> OpCode {
+    match op {
+        BinaryOp::Add => OpCode::Add,
+        BinaryOp::Sub => OpCode::Sub,
+        BinaryOp::Mul => OpCode::Mul,
+        BinaryOp::Div => OpCode::Div,
+        BinaryOp::Mod => OpCode::Mod,
+        BinaryOp::Equal => OpCode::Equal,
+        BinaryOp::NotEqual => OpCode::NotEqual,
+        BinaryOp::Less => OpCode::Less,
+        BinaryOp::LessEqual => OpCode::LessEqual,
+        BinaryOp::Greater => OpCode::Greater,
+        BinaryOp::GreaterEqual => OpCode::GreaterEqual,
+        // Short-circuit operators compile to jumps before reaching here.
+        BinaryOp::And | BinaryOp::Or => unreachable!(),
     }
 }
 
@@ -474,7 +594,7 @@ fn mark_tail_calls(chunk: &mut Chunk) {
             steps += 1;
             match chunk.code.get(j) {
                 Some(OpCode::Return) => break true,
-                Some(OpCode::Jump(target)) if steps < 64 => j = *target,
+                Some(OpCode::Jump(target)) if steps < 64 => j = *target as usize,
                 Some(OpCode::TruncateLocals(_)) => j += 1,
                 _ => break false,
             }

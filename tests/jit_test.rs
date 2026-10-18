@@ -104,9 +104,9 @@ fn predicates_logic_and_pipelines() {
          either(1, 2), same(3, 4), same(-3, 4), truthy(0), truthy(7), chain(4)]
     ";
     let (result, compiled) = differential(source);
-    let list = match result.unwrap() {
-        Value::List(items) => items,
-        other => panic!("expected list, got {other}"),
+    let list = match result.unwrap().into_items() {
+        Ok(items) => items,
+        Err(other) => panic!("expected list, got {other}"),
     };
     assert_eq!(list[9], Value::Int(14));
     assert_eq!(
@@ -215,7 +215,7 @@ fn engine_call_uses_native_code() {
     engine.eval(FIB).unwrap();
     assert!(matches!(
         engine.get_global("fib").unwrap(),
-        Value::Compiled { .. }
+        Value::Compiled(_)
     ));
     assert_eq!(
         engine.call("fib", &[Value::Int(25)]).unwrap(),
@@ -252,7 +252,7 @@ fn jit_is_opt_in() {
     assert!(engine.jit_functions().is_empty());
     assert!(matches!(
         engine.get_global("fib").unwrap(),
-        Value::Closure { .. }
+        Value::Closure(_)
     ));
     // Enabling later only affects programs compiled afterwards.
     assert!(engine.enable_jit());

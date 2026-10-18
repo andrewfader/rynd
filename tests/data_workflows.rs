@@ -262,7 +262,11 @@ fn attempt_restores_nested_frames_operands_and_preserves_effects() {
         "attempt(map, [[1], bad])",
     ] {
         assert!(
-            matches!(engine.eval(source).unwrap(), Value::Variant { name, .. } if name == "Err")
+            engine
+                .eval(source)
+                .unwrap()
+                .as_variant()
+                .is_some_and(|(name, _)| name == "Err")
         );
     }
     assert_eq!(

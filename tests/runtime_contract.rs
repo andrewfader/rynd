@@ -1,6 +1,5 @@
 use rynd::vm::runtime::{NativeRuntime, Runtime};
 use rynd::{RyndEngine, Value};
-use std::rc::Rc;
 
 #[test]
 fn builtin_contract_and_error_paths() {
@@ -112,21 +111,13 @@ fn native_runtime_supports_embedding_and_call_validation() {
     rt.set_global("answer", Value::Int(42));
     assert_eq!(rt.get_global("answer").unwrap(), Value::Int(42));
     assert!(rt.get_global("missing").is_err());
-    let native = Value::Native {
-        name: "host".into(),
-        arity: 1,
-        func: |args| Ok(args[0].clone()),
-    };
+    let native = Value::native("host", 1, |args| Ok(args[0].clone()));
     assert_eq!(
         rt.call(native.clone(), vec![Value::Int(5)]).unwrap(),
         Value::Int(5)
     );
     assert!(rt.call(native, vec![]).is_err());
-    let function = Value::Compiled {
-        name: "identity".into(),
-        arity: 1,
-        func: Rc::new(|_, args, _| Ok(args[0].clone())),
-    };
+    let function = Value::compiled("identity", 1, |_, args, _| Ok(args[0].clone()));
     assert_eq!(
         rt.call(function.clone(), vec![Value::Int(3)]).unwrap(),
         Value::Int(3)
@@ -139,11 +130,7 @@ fn native_runtime_supports_embedding_and_call_validation() {
             .unwrap(),
         Value::list(vec![Value::Int(2)])
     );
-    let recursive = Value::Compiled {
-        name: "recursive".into(),
-        arity: 0,
-        func: Rc::new(|rt, _, this| rt.call(this.clone(), vec![])),
-    };
+    let recursive = Value::compiled("recursive", 0, |rt, _, this| rt.call(this.clone(), vec![]));
     assert!(
         rt.call(recursive, vec![])
             .unwrap_err()
@@ -151,11 +138,7 @@ fn native_runtime_supports_embedding_and_call_validation() {
             .contains("depth limit")
     );
     assert!(rt.call(Value::Nil, vec![]).is_err());
-    let bytecode = Value::Function {
-        name: "test".into(),
-        arity: 0,
-        chunk_index: 0,
-    };
+    let bytecode = Value::function("test", 0, 0);
     assert!(rt.call(bytecode, vec![]).is_err());
 }
 

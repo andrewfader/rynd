@@ -32,91 +32,92 @@ pub trait Runtime {
     }
 }
 
+/// Builtins implemented in this module.
+pub static CORE_BUILTINS: &[(&str, usize)] = &[
+    ("parse_json", 1),
+    ("to_json", 1),
+    ("attempt", 2),
+    ("sort", 1),
+    ("sort_by", 2),
+    ("group_by", 2),
+    ("keys", 1),
+    ("values", 1),
+    ("entries", 1),
+    ("take", 2),
+    ("skip", 2),
+    ("any", 2),
+    ("all", 2),
+    ("find", 2),
+    ("filter_map", 2),
+    ("flat_map", 2),
+    ("enumerate", 1),
+    ("zip", 2),
+    ("zip_with", 3),
+    ("chunks", 2),
+    ("windows", 2),
+    ("reverse", 1),
+    ("uniq", 1),
+    ("flatten", 1),
+    ("each", 2),
+    ("partition", 2),
+    ("scan", 3),
+    ("map", 2),
+    ("filter", 2),
+    ("reduce", 3),
+    ("sum", 1),
+    ("len", 1),
+    ("range", 2),
+    ("head", 1),
+    ("tail", 1),
+    ("push", 2),
+    ("concat", 2),
+    ("print", 1),
+    ("println", 1),
+    ("to_string", 1),
+    ("lines", 1),
+    ("split", 2),
+    ("trim", 1),
+    ("join", 2),
+    ("parse_int", 1),
+    ("parse_float", 1),
+    ("contains", 2),
+    ("read_text", 1),
+    ("read_stdin", 0),
+    ("abs", 1),
+    ("min", 2),
+    ("max", 2),
+    ("to_map", 1),
+    ("Some", 1),
+    ("Ok", 1),
+    ("Err", 1),
+    ("Accept", 1),
+    ("Reject", 1),
+    ("merge", 2),
+    ("put", 3),
+    ("get", 3),
+    ("has_key", 2),
+    ("delete", 2),
+    ("apply", 2),
+    ("call_method", 3),
+];
+
+/// Every builtin table, in dispatch order.
+fn builtin_tables() -> [&'static [(&'static str, usize)]; 7] {
+    [
+        CORE_BUILTINS,
+        super::scripting::BUILTINS,
+        super::sockets::BUILTINS,
+        super::http::BUILTINS,
+        super::concurrency::BUILTINS,
+        super::crypto::BUILTINS,
+        super::store::BUILTINS,
+    ]
+}
+
 pub fn globals() -> HashMap<String, Value> {
     let mut globals = HashMap::new();
-    for (name, arity) in [
-        ("parse_json", 1),
-        ("to_json", 1),
-        ("attempt", 2),
-        ("sort", 1),
-        ("sort_by", 2),
-        ("group_by", 2),
-        ("keys", 1),
-        ("values", 1),
-        ("entries", 1),
-        ("take", 2),
-        ("skip", 2),
-        ("any", 2),
-        ("all", 2),
-        ("find", 2),
-        ("filter_map", 2),
-        ("flat_map", 2),
-        ("enumerate", 1),
-        ("zip", 2),
-        ("zip_with", 3),
-        ("chunks", 2),
-        ("windows", 2),
-        ("reverse", 1),
-        ("uniq", 1),
-        ("flatten", 1),
-        ("each", 2),
-        ("partition", 2),
-        ("scan", 3),
-        ("map", 2),
-        ("filter", 2),
-        ("reduce", 3),
-        ("sum", 1),
-        ("len", 1),
-        ("range", 2),
-        ("head", 1),
-        ("tail", 1),
-        ("push", 2),
-        ("concat", 2),
-        ("print", 1),
-        ("println", 1),
-        ("to_string", 1),
-        ("lines", 1),
-        ("split", 2),
-        ("trim", 1),
-        ("join", 2),
-        ("parse_int", 1),
-        ("parse_float", 1),
-        ("contains", 2),
-        ("read_text", 1),
-        ("read_stdin", 0),
-        ("abs", 1),
-        ("min", 2),
-        ("max", 2),
-        ("to_map", 1),
-        ("Some", 1),
-        ("Ok", 1),
-        ("Err", 1),
-        ("Accept", 1),
-        ("Reject", 1),
-        ("merge", 2),
-        ("put", 3),
-        ("get", 3),
-        ("has_key", 2),
-        ("delete", 2),
-        ("apply", 2),
-        ("call_method", 3),
-    ]
-    .iter()
-    .copied()
-    .chain(super::scripting::BUILTINS.iter().copied())
-    .chain(super::sockets::BUILTINS.iter().copied())
-    .chain(super::http::BUILTINS.iter().copied())
-    .chain(super::concurrency::BUILTINS.iter().copied())
-    .chain(super::crypto::BUILTINS.iter().copied())
-    .chain(super::store::BUILTINS.iter().copied())
-    {
-        globals.insert(
-            name.into(),
-            Value::Builtin {
-                name: name.into(),
-                arity,
-            },
-        );
+    for def in builtin_tables().iter().copied().flatten() {
+        globals.insert(def.0.into(), Value::Builtin(def));
     }
     globals.insert("None".into(), Value::variant("None", vec![]));
     globals.insert("args".into(), Value::list(vec![]));
@@ -170,6 +171,35 @@ pub fn compare(a: &Value, b: &Value) -> RyndResult<Option<Ordering>> {
 
 pub fn binary(op: &BinaryOp, a: Value, b: Value) -> RyndResult<Value> {
     use BinaryOp::*;
+    if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+        let (x, y) = (*x, *y);
+        return Ok(match op {
+            Equal => Value::Bool(x == y),
+            NotEqual => Value::Bool(x != y),
+            Less => Value::Bool(x < y),
+            LessEqual => Value::Bool(x <= y),
+            Greater => Value::Bool(x > y),
+            GreaterEqual => Value::Bool(x >= y),
+            Div | Mod if y == 0 => {
+                return Err(error(if *op == Div {
+                    "Division by zero"
+                } else {
+                    "Modulo by zero"
+                }));
+            }
+            _ => Value::Int(
+                match op {
+                    Add => x.checked_add(y),
+                    Sub => x.checked_sub(y),
+                    Mul => x.checked_mul(y),
+                    Div => x.checked_div(y),
+                    Mod => x.checked_rem(y),
+                    _ => return Err(error(format!("Cannot apply {op:?} to int and int"))),
+                }
+                .ok_or_else(|| error("Integer overflow"))?,
+            ),
+        });
+    }
     if matches!(op, Equal | NotEqual) {
         return Ok(Value::Bool(if *op == Equal { a == b } else { a != b }));
     }
@@ -183,13 +213,25 @@ pub fn binary(op: &BinaryOp, a: Value, b: Value) -> RyndResult<Value> {
         }));
     }
     if *op == Add && (matches!(a, Value::String(_)) || matches!(b, Value::String(_))) {
-        return Ok(Value::string(format!("{a}{b}")));
+        fn text(v: &Value) -> RyndResult<std::borrow::Cow<'_, str>> {
+            match v {
+                Value::String(s) => Ok(std::borrow::Cow::Borrowed(s.as_str())),
+                other => super::safety::render(other).map(std::borrow::Cow::Owned),
+            }
+        }
+        let (left, right) = (text(&a)?, text(&b)?);
+        super::safety::reserve_string(left.len().saturating_add(right.len()))?;
+        let mut out = String::with_capacity(left.len() + right.len());
+        out.push_str(&left);
+        out.push_str(&right);
+        return Ok(Value::string(out));
     }
     if let (Mul, Value::String(s), Value::Int(n)) = (op, &a, &b) {
         let len = s
             .len()
             .checked_mul((*n).max(0) as usize)
             .ok_or_else(|| error("String size overflow"))?;
+        super::safety::reserve_string(len)?;
         let mut out = String::new();
         out.try_reserve(len)
             .map_err(|_| error("String allocation failed"))?;
@@ -261,6 +303,7 @@ pub fn make_range(start: &Value, end: &Value, inclusive: bool) -> RyndResult<Val
     if let (Value::Int(start), Value::Int(end)) = (start, end) {
         let length = ((*end as i128) - (*start as i128) + i128::from(inclusive)).max(0);
         let length = usize::try_from(length).map_err(|_| error("Range size overflow"))?;
+        super::safety::reserve_items(length)?;
         let mut items = Vec::new();
         items
             .try_reserve(length)
@@ -277,7 +320,11 @@ pub fn make_range(start: &Value, end: &Value, inclusive: bool) -> RyndResult<Val
 }
 
 pub fn map_key(value: &Value) -> String {
-    value.to_string()
+    match value {
+        Value::String(s) => s.to_string(),
+        // An oversized key trips the run's budget, which stops it next check.
+        other => super::safety::render(other).unwrap_or_default(),
+    }
 }
 
 pub fn index(target: &Value, index: &Value) -> RyndResult<Value> {
@@ -311,9 +358,9 @@ pub fn index(target: &Value, index: &Value) -> RyndResult<Value> {
 pub fn field(target: &Value, field: &str, safe: bool) -> RyndResult<Value> {
     Ok(match target {
         Value::Map(m) => m.get(field).cloned().unwrap_or(Value::Nil),
-        Value::Variant { name, values } => match field {
-            "tag" | "name" => Value::string(name.clone()),
-            "value" if values.len() == 1 => values[0].clone(),
+        Value::Variant(v) => match field {
+            "tag" | "name" => Value::string(&*v.name),
+            "value" if v.values.len() == 1 => v.values[0].clone(),
             _ => Value::Nil,
         },
         _ if safe => Value::Nil,
@@ -339,12 +386,12 @@ pub fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<Value>> {
             (Pattern::Tuple(ps), Value::Tuple(vs)) | (Pattern::List(ps), Value::List(vs)) => {
                 ps.len() == vs.len() && ps.iter().zip(vs.iter()).all(|(p, v)| walk(p, v, bindings))
             }
-            (Pattern::Variant { name, args }, Value::Variant { name: tag, values }) => {
-                name == tag
-                    && args.len() == values.len()
+            (Pattern::Variant { name, args }, Value::Variant(v)) => {
+                **name == *v.name
+                    && args.len() == v.values.len()
                     && args
                         .iter()
-                        .zip(values.iter())
+                        .zip(v.values.iter())
                         .all(|(p, v)| walk(p, v, bindings))
             }
             _ => false,
@@ -367,12 +414,16 @@ pub fn pattern_names(pattern: &Pattern) -> Vec<String> {
 pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Value> {
     fn string(v: &Value) -> RyndResult<&str> {
         match v {
-            Value::String(s) => Ok(s.as_str()),
+            Value::String(s) => {
+                super::safety::charge(s.len() as u64 / 64)?;
+                Ok(s.as_str())
+            }
             _ => Err(error(format!("Expected string, found {}", v.type_name()))),
         }
     }
     fn list(v: &Value) -> RyndResult<&[Value]> {
         if let Value::List(l) = v {
+            super::safety::charge(l.len() as u64)?;
             Ok(l)
         } else {
             Err(error(format!("Expected list, found {}", v.type_name())))
@@ -383,6 +434,8 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
         "to_json" => super::json::stringify(&args[0]).map(Value::string),
         "attempt" => match rt.call_ref(&args[0], list(&args[1])?) {
             Ok(value) => Ok(Value::variant("Ok", vec![value])),
+            // Resource limits end the run; scripts cannot recover from them.
+            Err(error) if error.is_limit() || super::safety::tripped() => Err(error),
             Err(error) => Ok(Value::variant(
                 "Err",
                 vec![Value::string(error.to_string())],
@@ -431,7 +484,14 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 .iter()
                 .map(string)
                 .collect::<RyndResult<Vec<_>>>()?;
-            Ok(Value::string(parts.join(string(&args[1])?)))
+            let separator = string(&args[1])?;
+            let total = parts
+                .iter()
+                .map(|p| p.len())
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(separator.len().saturating_mul(parts.len()));
+            super::safety::reserve_string(total)?;
+            Ok(Value::string(parts.join(separator)))
         }
         "parse_int" => string(&args[0])?
             .trim()
@@ -512,11 +572,13 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
             list(&args[0])?.iter().skip(1).cloned().collect(),
         )),
         "push" => {
+            super::safety::reserve_items(list(&args[0])?.len() + 1)?;
             let mut out = list(&args[0])?.to_vec();
             out.push(args[1].clone());
             Ok(Value::list(out))
         }
         "concat" => {
+            super::safety::reserve_items(list(&args[0])?.len() + list(&args[1])?.len())?;
             let mut out = list(&args[0])?.to_vec();
             out.extend_from_slice(list(&args[1])?);
             Ok(Value::list(out))
@@ -533,13 +595,13 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
             }
             Ok(Value::map(out))
         }
-        "to_string" => Ok(Value::string(args[0].to_string())),
+        "to_string" => Ok(Value::string(super::safety::render(&args[0])?)),
         "print" | "println" => {
-            rt.write(&format!(
-                "{}{}",
-                args[0],
-                if name == "println" { "\n" } else { "" }
-            ))?;
+            let mut text = super::safety::render(&args[0])?;
+            if name == "println" {
+                text.push('\n');
+            }
+            rt.write(&text)?;
             Ok(Value::Nil)
         }
         "abs" => match args[0] {
@@ -564,34 +626,54 @@ pub fn call_builtin(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndRes
                 },
             )
         }
-        _ => {
-            let is = |table: &[(&str, usize)]| table.iter().any(|(b, _)| *b == name);
-            if is(super::sockets::BUILTINS) {
-                super::sockets::call(rt, name, args)
-            } else if is(super::http::BUILTINS) {
-                super::http::call(rt, name, args)
-            } else if is(super::crypto::BUILTINS) {
-                super::crypto::call(rt, name, args)
-            } else if is(super::store::BUILTINS) {
-                super::store::call(rt, name, args)
-            } else if super::concurrency::BUILTINS.iter().any(|(b, _)| *b == name) {
-                super::concurrency::call(rt, name, args)
-            } else {
-                super::scripting::call(rt, name, args)
-            }
+        _ => Err(error(format!("Unknown builtin '{name}'"))),
+    }
+}
+
+/// Call the builtin `def` (an entry of one of the builtin tables).
+pub fn call_builtin_def(
+    rt: &mut dyn Runtime,
+    def: &'static (&'static str, usize),
+    args: &[Value],
+) -> RyndResult<Value> {
+    let within = |table: &'static [(&'static str, usize)]| {
+        table
+            .as_ptr_range()
+            .contains(&(def as *const (&'static str, usize)))
+    };
+    let name = def.0;
+    if within(CORE_BUILTINS) {
+        call_builtin(rt, name, args)
+    } else if within(super::scripting::BUILTINS) {
+        super::scripting::call(rt, name, args)
+    } else if within(super::concurrency::BUILTINS) {
+        super::concurrency::call(rt, name, args)
+    } else if within(super::sockets::BUILTINS) {
+        super::sockets::call(rt, name, args)
+    } else if within(super::http::BUILTINS) {
+        super::http::call(rt, name, args)
+    } else if within(super::crypto::BUILTINS) {
+        super::crypto::call(rt, name, args)
+    } else if within(super::store::BUILTINS) {
+        super::store::call(rt, name, args)
+    } else {
+        // A table entry from another copy of the runtime: route by name.
+        match builtin_tables()
+            .iter()
+            .copied()
+            .flatten()
+            .find(|candidate| candidate.0 == name)
+        {
+            Some(found) if !std::ptr::eq(found, def) => call_builtin_def(rt, found, args),
+            _ => Err(error(format!("Unknown builtin '{name}'"))),
         }
     }
 }
 
 pub fn arity(callee: &Value) -> RyndResult<usize> {
-    match callee {
-        Value::Builtin { arity, .. }
-        | Value::Native { arity, .. }
-        | Value::Compiled { arity, .. }
-        | Value::Function { arity, .. }
-        | Value::Closure { arity, .. } => Ok(*arity),
-        v => Err(error(format!("Cannot call {}", v.type_name()))),
-    }
+    callee
+        .arity()
+        .ok_or_else(|| error(format!("Cannot call {}", callee.type_name())))
 }
 
 pub fn check_arity(callee: &Value, found: usize) -> RyndResult<()> {
@@ -612,14 +694,8 @@ pub struct NativeRuntime {
 impl NativeRuntime {
     /// Register Rust functionality for generated Rynd code.
     pub fn register_fn(&mut self, name: &str, arity: usize, func: super::value::NativeFunction) {
-        self.globals.insert(
-            name.into(),
-            Value::Native {
-                name: name.into(),
-                arity,
-                func,
-            },
-        );
+        self.globals
+            .insert(name.into(), Value::native(name, arity, func));
     }
     pub fn register_closure<F>(&mut self, name: &str, arity: usize, func: F)
     where
@@ -627,11 +703,7 @@ impl NativeRuntime {
     {
         self.globals.insert(
             name.into(),
-            Value::Compiled {
-                name: name.into(),
-                arity,
-                func: std::rc::Rc::new(move |_, args, _| func(args)),
-            },
+            Value::compiled(name, arity, move |_, args, _| func(args)),
         );
     }
 }
@@ -650,7 +722,7 @@ impl Runtime for NativeRuntime {
     fn call_ref(&mut self, callee: &Value, args: &[Value]) -> RyndResult<Value> {
         check_arity(callee, args.len())?;
         match callee {
-            Value::Compiled { func, .. } => {
+            Value::Compiled(compiled) => {
                 if self.depth >= super::safety::MAX_CALL_DEPTH {
                     return Err(super::safety::depth_error());
                 }
@@ -658,12 +730,12 @@ impl Runtime for NativeRuntime {
                     return Err(super::safety::stack_error());
                 }
                 self.depth += 1;
-                let result = func(self, args, callee);
+                let result = (compiled.func)(self, args, callee);
                 self.depth -= 1;
                 result
             }
-            Value::Native { func, .. } => func(args),
-            Value::Builtin { name, .. } => call_builtin(self, name, args),
+            Value::Native(native) => (native.func)(args),
+            Value::Builtin(def) => call_builtin_def(self, def, args),
             _ => Err(error("Bytecode function cannot execute in native runtime")),
         }
     }

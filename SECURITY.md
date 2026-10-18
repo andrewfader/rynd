@@ -23,6 +23,37 @@ Registered functions are the security boundary. A script can call exactly what
 you install; expose narrow operations (`lookup_price(sku)`) rather than broad
 ones (`query(sql)`).
 
+## Resource limits
+
+`RyndEngine::sandboxed()` also applies `Limits::sandbox()` to every run, and
+`engine.set_limits(limits)` applies limits to any engine. Each run (`eval`,
+`run`, `call`, `filtermap`, ...) gets a fresh budget:
+
+| `Limits` field | Sandbox default | What it bounds |
+| --- | --- | --- |
+| `operations` | 50,000,000 | Function calls, plus one unit per element a builtin reads or builds and per hash round. Bytecode has no backward jumps, so every loop is a call and is counted. |
+| `time` | 5 s | Wall-clock time, including time fibers spend waiting. |
+| `allocation` | 512 MiB | Bytes of strings, lists, maps, and variants created during the run (counted at creation, not credited when freed). |
+| `string_bytes` | 16 MiB | The longest string a script may build. |
+| `collection_len` | 1,000,000 | Elements in one list, tuple, or map. |
+| `call_depth` | 1,000 | Nested script calls (never above 10,000). |
+| `source_bytes` | 1 MiB | Source text passed to `compile`/`eval`. |
+| `fibers` | 1,000 | Fibers alive at once. |
+
+Builtins that could expand a small value into a huge one check their output
+size before allocating: `range`, string `+` and `*`, `join`, `replace`,
+`concat`, `push`, `flatten`, `windows`, `to_string`, printing, and `to_json`
+(a list sharing one large list a thousand times cannot print gigabytes).
+Quadratic builtins such as `uniq` are charged for their work.
+
+Exceeding a limit raises `RyndError::LimitExceeded` (`error.is_limit()`). The
+run cannot recover from it: `attempt` re-raises it, and every later check in the
+run fails again, so the host always sees it. The engine stays usable for the
+next run. `engine.interrupt_handle()` returns an `Interrupt` another thread can
+trigger (a watchdog, a cancelled request); the run stops at its next check, at
+most about a thousand calls or 50 ms of waiting later. The opt-in `jit` feature
+compiles nothing for limited engines, since native code would skip the checks.
+
 ## Limits the engine enforces
 
 - **Call depth** is capped at `rynd::vm::safety::MAX_CALL_DEPTH` (10,000) in
@@ -34,12 +65,16 @@ ones (`query(sql)`).
   in every backend and build profile.
 - **Script errors are values** to the host: every failure is a `RyndError`, and
   the engine stays usable after one.
-- **`unsafe` is confined** to two `Send` impls: one that moves `Rc`-based
-  values between the threads of a fiber group, and one for the stores a group
-  owns. Only one thread of a group runs script code at a time, and the
-  handoff goes through a mutex. Stores refuse access from other groups. The
-  opt-in `jit` feature also executes Cranelift-generated machine code for
-  integer/boolean functions that pass a static type check.
+- **Nesting cannot overflow the stack**: the parser rejects source nested
+  more than 200 levels (brackets, blocks, patterns, or chained operators), and
+  values nested arbitrarily deep (a million-level list built by a loop) drop,
+  compare, and print without recursing on the native stack.
+- **`unsafe` is confined** to the fiber layer (`vm/fiber.rs`: stack mappings,
+  `poll`, and the context switch; `vm/concurrency.rs`: handing a blocking call
+  to a helper thread while its fiber waits). Script values never leave the
+  thread that created them. The opt-in `jit` feature also executes
+  Cranelift-generated machine code for integer/boolean functions that pass a
+  static type check.
 - **HTTP input is bounded**: request heads at 64 KiB (431), bodies at 16 MiB
   (413), idle keep-alive connections at 5 seconds, and header values with
   newlines are refused on both server and client.
@@ -49,17 +84,17 @@ ones (`query(sql)`).
 
 ## Limits the host must enforce
 
-The engine has no instruction budget and no memory quota. Recursion is bounded,
-but a script can still iterate over a huge `range`, build large collections, or
-keep a fiber spinning without yielding. Waits that can never complete are
-reported as deadlocks, but a fiber blocked on a socket waits as long as the
-socket does. For untrusted input:
+The allocation limit counts what a run creates, not what is live, and is an
+estimate; it is not a hard memory quota. Host functions run outside the
+budget: a registered function that loops or allocates is yours to bound. For
+hostile input, defense in depth still applies:
 
-- Cap source size before compiling.
-- Run scripts in a separate process with CPU-time and memory limits
-  (`setrlimit`, cgroups, or a container) and kill it on timeout.
-- Use `sandboxed()` unless the script genuinely needs host access, and give
-  that process its own scratch directory and network policy when it does.
+- Use `sandboxed()` (or `set_limits`) unless the script genuinely needs
+  unlimited resources, and give scripts that need host access their own
+  scratch directory and network policy.
+- For input that may be actively malicious, also run the engine in a separate
+  process with CPU-time and memory limits (`setrlimit`, cgroups, or a
+  container) and kill it on timeout.
 - Catch panics at your host-function boundary; a panic inside a registered Rust
   closure propagates to the caller like any Rust panic.
 - `rynd build` and `rynd::build::native` invoke `rustc` on generated code;

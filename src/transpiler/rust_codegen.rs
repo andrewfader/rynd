@@ -56,6 +56,8 @@ impl RustTranspiler {
         out.push_str(include_str!("../vm/safety.rs"));
         out.push_str("\n} pub mod concurrency {\n");
         out.push_str(include_str!("../vm/concurrency.rs"));
+        out.push_str("\n} pub mod fiber {\n");
+        out.push_str(include_str!("../vm/fiber.rs"));
         out.push_str("\n} pub mod http {\n");
         out.push_str(include_str!("../vm/http.rs"));
         out.push_str("\n} pub mod crypto {\n");
@@ -200,9 +202,18 @@ impl RustTranspiler {
         self.depth = old_depth;
         let looped = tail.is_some_and(|t| t.used);
         let binding = if looped { "let mut" } else { "let" };
-        let mut setup = format!("let {self_var} = __self.clone();\n");
+        // Bind only what the body names; parameters borrow the arguments
+        // unless self tail calls rebind them.
+        let mut setup = String::new();
+        if looped || mentions(&body, &self_var) {
+            setup.push_str(&format!("let {self_var} = __self.clone();\n"));
+        }
         for (i, rust) in param_vars.iter().enumerate() {
-            setup.push_str(&format!("{binding} {rust} = __args[{i}].clone();\n"));
+            if looped {
+                setup.push_str(&format!("{binding} {rust} = __args[{i}].clone();\n"));
+            } else {
+                setup.push_str(&format!("let {rust} = &__args[{i}];\n"));
+            }
         }
         let run = if looped {
             // Self tail calls rebind the parameters and jump back here.
@@ -211,7 +222,7 @@ impl RustTranspiler {
             format!("Ok({body})")
         };
         Ok(format!(
-            "{{ {captures} Value::Compiled {{ name: {name:?}.into(), arity: {}, func: Rc::new(move |__rt, __args, __self| {{ {setup} {run} }}) }} }}",
+            "{{ {captures} Value::compiled({name:?}, {}, move |__rt, __args, __self| {{ {setup} {run} }}) }}",
             params.len()
         ))
     }
@@ -366,7 +377,13 @@ impl RustTranspiler {
             return self.transpile_expression(&lowered);
         }
         Ok(match &expr.kind {
-            ExprKind::Literal(lit) => format!("runtime::literal(&{})", literal_code(lit)),
+            ExprKind::Literal(lit) => match lit {
+                Literal::Nil => "Value::Nil".into(),
+                Literal::Bool(v) => format!("Value::Bool({v})"),
+                Literal::Int(v) => format!("Value::Int({v})"),
+                Literal::Float(v) => format!("Value::Float(f64::from_bits({}))", v.to_bits()),
+                Literal::String(_) => format!("runtime::literal(&{})", literal_code(lit)),
+            },
             ExprKind::Identifier(name) => {
                 if let Some((_, rust)) = self.bindings.iter().rev().find(|(n, _)| n == name) {
                     format!("{rust}.clone()")
@@ -550,4 +567,15 @@ fn span_code(span: &crate::Span) -> String {
         Some(file) => format!("{code}.with_file({file:?})"),
         None => code,
     }
+}
+
+/// Whether generated `code` names the variable `var` (not merely a longer
+/// identifier that starts with it).
+fn mentions(code: &str, var: &str) -> bool {
+    code.match_indices(var).any(|(at, _)| {
+        !code[at + var.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }

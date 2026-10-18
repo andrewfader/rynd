@@ -89,8 +89,8 @@ fn integer_errors_are_results_not_panics() {
 fn closures_release_unused_host_values_and_keep_transitive_values() {
     use rynd::{RyndEngine, Value};
     use std::rc::Rc;
-    let retained = Rc::new(vec![Value::Int(42)]);
-    let unused = Rc::new(vec![Value::Int(99)]);
+    let retained = Rc::new(rynd::vm::value::Items::from(vec![Value::Int(42)]));
+    let unused = Rc::new(rynd::vm::value::Items::from(vec![Value::Int(99)]));
     let mut engine = RyndEngine::new();
     engine
         .eval(r"fn factory(used, unused) { \ -> \ -> used[0] }")

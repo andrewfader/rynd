@@ -11,7 +11,7 @@ use crate::error::RyndResult;
 use std::convert::TryFrom;
 use std::io::Read;
 
-pub const BUILTINS: &[(&str, usize)] = &[
+pub static BUILTINS: &[(&str, usize)] = &[
     ("sha256", 1),
     ("hmac_sha256", 2),
     ("base64_encode", 1),
@@ -395,7 +395,7 @@ pub fn jwt_verify(token: &str, secret: &[u8]) -> Result<Value, String> {
         .ok()
         .and_then(|h| String::from_utf8(h).ok())
         .ok_or("malformed header")?;
-    match super::json::parse(&header_json) {
+    match super::json::parse(&header_json).as_ref() {
         Ok(Value::Map(h)) if h.get("alg") == Some(&Value::string("HS256")) => {}
         _ => return Err("unsupported algorithm".into()),
     }
@@ -472,14 +472,19 @@ pub fn call(_rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Val
             &bytes_of(&args[0])?,
             &bytes_of(&args[1])?,
         ))),
-        "password_hash" => Ok(Value::string(password_hash(
-            text(&args[0])?,
-            PASSWORD_ITERATIONS,
-        )?)),
-        "password_verify" => Ok(Value::Bool(password_verify(
-            text(&args[0])?,
-            text(&args[1])?,
-        ))),
+        "password_hash" => {
+            super::safety::charge(u64::from(PASSWORD_ITERATIONS))?;
+            Ok(Value::string(password_hash(
+                text(&args[0])?,
+                PASSWORD_ITERATIONS,
+            )?))
+        }
+        "password_verify" => {
+            let stored = text(&args[1])?;
+            let rounds = stored.split('$').nth(2).and_then(|n| n.parse::<u64>().ok());
+            super::safety::charge(rounds.unwrap_or(0).min(10_000_000))?;
+            Ok(Value::Bool(password_verify(text(&args[0])?, stored)))
+        }
         "jwt_sign" => Ok(Value::string(jwt_sign(&args[0], &bytes_of(&args[1])?)?)),
         "jwt_verify" => Ok(match jwt_verify(text(&args[0])?, &bytes_of(&args[1])?) {
             Ok(claims) => Value::variant("Ok", vec![claims]),

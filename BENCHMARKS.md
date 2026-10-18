@@ -1,5 +1,50 @@
 # Measured performance
 
+## Interpreter, value layout, and fibers — 2026-10-17
+
+`cargo bench --offline --bench rynd_benchmarks`, release, same i9-10850K host
+and 3 warmup / 20 sampled-batch method as below; the baseline is commit
+`55968ea` measured on the same host the same day. The host was not isolated
+(a desktop session was running) and the job was capped at 2.5 cores. Every
+workload validated its result.
+
+| Workload (µs/op, mean) | `55968ea` | Now | Speedup |
+| --- | ---: | ---: | ---: |
+| VM `fib(18)`, precompiled | 1552.5 | 429.3 | 3.6× |
+| VM pipeline, 10,000 items, precompiled | 1915.1 | 759.1 | 2.5× |
+| VM `filter` + `head`, first match | 859.2 | 399.3 | 2.2× |
+| VM `filter` + `map` + `sum`, reused input | 1747.7 | 731.5 | 2.4× |
+| VM `zip` + destructured map | 2424.3 | 1752.2 | 1.4× |
+| VM `zip_with` + `sum` | 1103.4 | 618.9 | 1.8× |
+| VM `filter_map` + `sum` | 2448.5 | 1177.1 | 2.1× |
+| Native pipeline, in-process | 698.2 | 442.7 | 1.6× |
+| Handwritten typed Rust pipeline | 2.4 | 2.3 | — |
+
+A larger workload set (best of 7 runs, one process per build, same host):
+
+| Workload | `55968ea` (ms) | Now (ms) | Speedup |
+| --- | ---: | ---: | ---: |
+| `fib(24)` | 27.8 | 7.7 | 3.6× |
+| Tail-recursive loop, 1,000,000 steps | 189.4 | 40.8 | 4.6× |
+| `filter`/`map`/`sum`, 100,000 | 19.2 | 7.8 | 2.5× |
+| `reduce`, 100,000 | 9.8 | 5.0 | 2.0× |
+| String building, 20,000 | 9.3 | 6.1 | 1.5× |
+| Map literals and fields, 20,000 | 17.6 | 9.9 | 1.8× |
+| `match` with guards, 100,000 | 43.4 | 20.8 | 2.1× |
+| Closures from a factory, 100,000 | 30.0 | 14.8 | 2.0× |
+| 2,000 fibers spawned, then awaited | 142.6 | 24.4 | 5.8× |
+| 2,000 fibers spawned and awaited one by one | 141.6 | 4.3 | 33× |
+| Channel ping-pong, 20,000 round trips | 126.5 | 18.6 | 6.8× |
+
+The interpreter gains come from copyable instructions, locals in stack slots,
+linked global slots, integer fast paths and fused compare-and-branch
+instructions, and a 16-byte `Value`. Fiber gains come from replacing an OS
+thread per fiber with coroutines: a pooled stack makes a spawn about 2 µs, and
+a switch is a register save and restore. A burst of new fibers pays for fresh
+stack mappings (about 12 µs each) until the pool fills. Generated native code
+still uses dynamic values and remains about 190× slower than typed Rust on
+the pipeline.
+
 ## Scripting and debugger toolkit — 2026-09-26
 
 Release measurements use the same host and 3 warmup / 20 sampled-batch method

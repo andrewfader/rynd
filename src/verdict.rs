@@ -40,13 +40,13 @@ impl Verdict {
     /// Split a script result into its verdict and payload. `Accept(x)` and
     /// `Reject(x)` yield `x`; other values are their own payload.
     pub fn split(value: Value) -> (Self, Value) {
+        if let Some(payload) = value.variant_payload("Accept") {
+            return (Self::Accept, payload.clone());
+        }
+        if let Some(payload) = value.variant_payload("Reject") {
+            return (Self::Reject, payload.clone());
+        }
         match value {
-            Value::Variant { name, values } if values.len() == 1 && name == "Accept" => {
-                (Self::Accept, values[0].clone())
-            }
-            Value::Variant { name, values } if values.len() == 1 && name == "Reject" => {
-                (Self::Reject, values[0].clone())
-            }
             other if other.is_truthy() => (Self::Accept, other),
             other => (Self::Reject, other),
         }

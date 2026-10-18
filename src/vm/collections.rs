@@ -7,9 +7,13 @@ use crate::error::RyndResult;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
+/// A list argument, charged to the run's budget by length.
 fn list(value: &Value) -> RyndResult<&[Value]> {
     match value {
-        Value::List(items) => Ok(items),
+        Value::List(items) => {
+            super::safety::charge(items.len() as u64)?;
+            Ok(items)
+        }
         _ => Err(error(format!("Expected list, found {}", value.type_name()))),
     }
 }
@@ -38,7 +42,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             let Value::Map(m2) = &args[1] else {
                 return Err(error("merge() expects map as second argument"));
             };
-            let mut out = (**m1).clone();
+            let mut out = (***m1).clone();
             for (k, v) in m2.iter() {
                 out.insert(k.clone(), v.clone());
             }
@@ -57,7 +61,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                     )));
                 }
             };
-            let mut out = (**m).clone();
+            let mut out = (***m).clone();
             out.insert(key.into(), args[2].clone());
             return Ok(Value::map(out));
         }
@@ -109,7 +113,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                     )));
                 }
             };
-            let mut out = (**m).clone();
+            let mut out = (***m).clone();
             out.remove(key);
             return Ok(Value::map(out));
         }
@@ -137,6 +141,10 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                 .ok()
                 .filter(|n| *n > 0)
                 .ok_or_else(|| error("Batch size must be a positive integer"))?;
+            if name == "windows" {
+                let windows = items.len().saturating_sub(n - 1) as u64;
+                super::safety::charge(windows.saturating_mul(n as u64))?;
+            }
             let groups: Vec<Value> = if name == "chunks" {
                 items.chunks(n).map(|v| Value::list(v.to_vec())).collect()
             } else {
@@ -148,6 +156,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
         "uniq" => {
             let mut out = Vec::new();
             for item in items {
+                super::safety::charge(out.len() as u64)?;
                 if !out.contains(item) {
                     out.push(item.clone());
                 }
@@ -155,7 +164,15 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             Ok(Value::list(out))
         }
         "flatten" => {
-            let mut out = Vec::new();
+            let total = items
+                .iter()
+                .map(|item| match item {
+                    Value::List(inner) => inner.len(),
+                    _ => 0,
+                })
+                .fold(0usize, usize::saturating_add);
+            super::safety::reserve_items(total)?;
+            let mut out = Vec::with_capacity(total);
             for item in items {
                 out.extend_from_slice(list(item)?);
             }
@@ -256,16 +273,11 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                 let value = rt.call_ref(&args[1], std::slice::from_ref(item))?;
                 if name == "flat_map" {
                     out.extend_from_slice(list(&value)?);
+                    super::safety::reserve_items(out.len())?;
                 } else {
-                    match value {
-                        Value::Variant { name, values }
-                            if matches!(name.as_str(), "Some" | "Accept") && values.len() == 1 =>
-                        {
-                            out.push(values[0].clone())
-                        }
-                        Value::Variant { name, values }
-                            if (name == "None" && values.is_empty())
-                                || (name == "Reject" && values.len() == 1) => {}
+                    match value.as_variant() {
+                        Some(("Some" | "Accept", [inner])) => out.push(inner.clone()),
+                        Some(("None", []) | ("Reject", [_])) => {}
                         _ => {
                             return Err(error(
                                 "filter_map() callback must return Some(value), None, Accept(value), or Reject(value)",
@@ -280,10 +292,13 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
             for item in items {
                 let key = rt.call_ref(&args[1], std::slice::from_ref(item))?;
-                let Value::String(key) = key else {
+                let Value::String(key) = &key else {
                     return Err(error("group_by() callback must return a string key"));
                 };
-                groups.entry((*key).clone()).or_default().push(item.clone());
+                groups
+                    .entry((**key).clone())
+                    .or_default()
+                    .push(item.clone());
             }
             Ok(Value::map(
                 groups

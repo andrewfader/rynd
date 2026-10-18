@@ -61,7 +61,7 @@ use crate::syntax::ast::{BinaryOp, Expr, ExprKind, Literal, Pattern, Program, St
 use crate::vm::opcode::OpCode;
 use crate::vm::runtime::{Runtime, error};
 use crate::vm::safety::{MAX_CALL_DEPTH, depth_error};
-use crate::vm::value::{CompiledFunction, Value};
+use crate::vm::value::{self, Closure, Value};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{self, AbiParam, FuncRef, InstBuilder, MemFlagsData, types};
 use cranelift_codegen::isa::OwnedTargetIsa;
@@ -143,7 +143,7 @@ impl RyndEngine {
         let Some(jit) = &mut self.jit else {
             return;
         };
-        let Some(chunk) = self.machine.chunks.get_mut(entry) else {
+        let Some(chunk) = self.machine.chunks_mut().get_mut(entry) else {
             return;
         };
         let mut analysis = Analysis::new(program);
@@ -159,17 +159,18 @@ impl RyndEngine {
                 captures,
             } = op
             {
+                let name = &chunk.names[*name as usize];
                 *seen.entry(name).or_default() += 1;
                 if let Some(&i) = analysis.index.get(&**name)
                     && *captures == 0
-                    && *arity == analysis.funcs[i].params.len()
+                    && *arity as usize == analysis.funcs[i].params.len()
                 {
-                    let original = Value::Closure {
-                        chunk_index: *chunk_index,
-                        arity: *arity,
+                    let original = Value::Closure(Rc::new(Closure {
+                        chunk_index: *chunk_index as usize,
+                        arity: *arity as usize,
                         name: name.clone(),
-                        upvalues: Rc::new(Vec::new()),
-                    };
+                        upvalues: Vec::new(),
+                    }));
                     sites[i] = Some((ip, original));
                 }
             }
@@ -199,6 +200,7 @@ impl RyndEngine {
             };
             let guards = Rc::new(OnceCell::new());
             let func = wrapper(
+                analysis.funcs[i].name,
                 code.clone(),
                 *ptr,
                 analysis.funcs[i].params.len(),
@@ -225,67 +227,68 @@ impl RyndEngine {
                 continue;
             };
             let name = analysis.funcs[i].name;
-            let constant = chunk.add_constant(Value::Compiled {
-                name: name.into(),
-                arity: analysis.funcs[i].params.len(),
-                func,
-            });
-            chunk.code[*ip] = OpCode::Constant(constant);
+            let constant = chunk.add_constant(Value::Compiled(func));
+            chunk.code[*ip] = OpCode::Constant(constant as u32);
             jit.compiled.insert(name.to_string());
         }
     }
 }
 
 /// A compiled wrapper and the guard list it checks before running natively.
-type Installed = (Rc<CompiledFunction>, Rc<OnceCell<Guards>>);
+type Installed = (Rc<value::Compiled>, Rc<OnceCell<Guards>>);
 
 /// Other compiled functions (by global name) that native code may reach.
-type Guards = Vec<(String, Weak<CompiledFunction>)>;
+type Guards = Vec<(String, Weak<value::Compiled>)>;
 
 /// Host entry trampoline: `(args: *const i64, depth: i64, status: *mut u32) -> i64`.
 type Trampoline = unsafe extern "C" fn(*const i64, i64, *mut u32) -> i64;
 
 fn wrapper(
+    name: &str,
     code: Rc<NativeCode>,
     entry: *const u8,
     arity: usize,
     ret: Ty,
     original: Value,
     guards: Rc<OnceCell<Guards>>,
-) -> Rc<CompiledFunction> {
+) -> Rc<value::Compiled> {
     // SAFETY: `entry` is a finalized trampoline of `code.module` with exactly
     // this signature; `code` is captured below so the memory outlives it.
     let trampoline: Trampoline = unsafe { std::mem::transmute(entry) };
-    Rc::new(
-        move |rt: &mut dyn Runtime, args: &[Value], _callee: &Value| {
-            let mut ints = Vec::with_capacity(arity);
-            for arg in args {
-                match arg {
-                    Value::Int(n) => ints.push(*n),
-                    _ => return rt.call_ref(&original, args),
+    Rc::new(value::Compiled {
+        name: name.into(),
+        arity,
+        func: Box::new(
+            move |rt: &mut dyn Runtime, args: &[Value], _callee: &Value| {
+                let mut ints = Vec::with_capacity(arity);
+                for arg in args {
+                    match arg {
+                        Value::Int(n) => ints.push(*n),
+                        _ => return rt.call_ref(&original, args),
+                    }
                 }
-            }
-            if ints.len() != arity || !guards_hold(rt, &guards) {
-                return rt.call_ref(&original, args);
-            }
-            // Native frames continue the caller's depth, as a bytecode call would.
-            let depth = rt.call_depth();
-            if depth >= MAX_CALL_DEPTH {
-                return Err(depth_error());
-            }
-            let mut status = 0u32;
-            // SAFETY: `ints` holds `arity` values as the trampoline expects.
-            let result = unsafe { trampoline(ints.as_ptr(), depth as i64 + 1, &mut status) };
-            if status != 0 {
-                let site = &code.sites[status as usize - 1];
-                return Err(site.error.clone().at(site.span.clone()));
-            }
-            Ok(match ret {
-                Ty::Bool => Value::Bool(result != 0),
-                _ => Value::Int(result),
-            })
-        },
-    )
+                if ints.len() != arity || !guards_hold(rt, &guards) {
+                    return rt.call_ref(&original, args);
+                }
+                // Native frames continue the caller's depth, as a bytecode call would.
+                let depth = rt.call_depth();
+                if depth >= MAX_CALL_DEPTH {
+                    return Err(depth_error());
+                }
+                let mut status = 0u32;
+                // SAFETY: `ints` holds `arity` values as the trampoline expects.
+                let result = unsafe { trampoline(ints.as_ptr(), depth as i64 + 1, &mut status) };
+                if status != 0 {
+                    let site = &code.sites[status as usize - 1];
+                    return Err(site.error.clone().at(site.span.clone()));
+                }
+                Ok(match ret {
+                    Ty::Bool => Value::Bool(result != 0),
+                    _ => Value::Int(result),
+                })
+            },
+        ),
+    })
 }
 
 fn guards_hold(rt: &dyn Runtime, guards: &OnceCell<Guards>) -> bool {
@@ -293,8 +296,8 @@ fn guards_hold(rt: &dyn Runtime, guards: &OnceCell<Guards>) -> bool {
         return false;
     };
     guards.iter().all(|(name, expected)| {
-        matches!(rt.get_global(name), Ok(Value::Compiled { func, .. })
-            if Weak::ptr_eq(&Rc::downgrade(&func), expected))
+        matches!(rt.get_global(name).as_ref(), Ok(Value::Compiled(func))
+            if Weak::ptr_eq(&Rc::downgrade(func), expected))
     })
 }
 

@@ -1,7 +1,7 @@
 //! HTTP/1.1 for Rynd: a fiber-per-connection server, a client, Plug-style
 //! connection helpers, routing, and URL encoding.
 use super::{
-    concurrency::{self, blocking},
+    concurrency,
     runtime::{Runtime, error},
     sockets::{self, io},
     value::Value,
@@ -9,13 +9,11 @@ use super::{
 use crate::error::RyndResult;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
-use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const BUILTINS: &[(&str, usize)] = &[
+pub static BUILTINS: &[(&str, usize)] = &[
     ("parse_http_request", 1),
     ("format_http_response", 3),
     ("match_route", 2),
@@ -52,7 +50,7 @@ fn text(value: &Value) -> RyndResult<&str> {
 
 fn conn_map(value: &Value, builtin: &str) -> RyndResult<BTreeMap<String, Value>> {
     match value {
-        Value::Map(m) => Ok((**m).clone()),
+        Value::Map(m) => Ok((***m).clone()),
         _ => Err(error(format!("{builtin}() expects conn map"))),
     }
 }
@@ -268,12 +266,21 @@ impl From<ReadError> for crate::error::RyndError {
 struct Reader {
     stream: Arc<TcpStream>,
     buf: Vec<u8>,
+    /// Longest wait for each read; `None` waits as long as the peer does.
+    timeout: Option<Duration>,
 }
 
 impl Reader {
+    fn new(stream: Arc<TcpStream>, timeout: Option<Duration>) -> Self {
+        Reader {
+            stream,
+            buf: Vec::new(),
+            timeout,
+        }
+    }
     fn fill(&mut self) -> std::io::Result<usize> {
         let mut chunk = [0u8; 8192];
-        let n = (&*self.stream).read(&mut chunk)?;
+        let n = sockets::read(&self.stream, &mut chunk, self.timeout)?;
         self.buf.extend_from_slice(&chunk[..n]);
         Ok(n)
     }
@@ -399,7 +406,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn header_map(value: Option<&Value>) -> BTreeMap<String, Value> {
     match value {
-        Some(Value::Map(m)) => (**m).clone(),
+        Some(Value::Map(m)) => (***m).clone(),
         _ => BTreeMap::new(),
     }
 }
@@ -507,14 +514,10 @@ fn handle_connection(
     handler: &Value,
 ) -> RyndResult<Value> {
     let stream = sockets::stream(socket)?;
-    let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
-    let mut reader = Reader {
-        stream: stream.clone(),
-        buf: Vec::new(),
-    };
+    let mut reader = Reader::new(stream.clone(), Some(IDLE_TIMEOUT));
     let mut served = 0;
     loop {
-        let request = match blocking(|| reader.request()) {
+        let request = match reader.request() {
             Ok(Some(request)) => request,
             // Clean close, idle timeout, reset, or truncated message.
             Ok(None) | Err(ReadError::Io(_) | ReadError::Closed(_)) => break,
@@ -526,7 +529,7 @@ fn handle_connection(
                     &[("connection", "close"), ("content-type", "text/plain")],
                     false,
                 )?;
-                let _ = blocking(|| (&*stream).write_all(&bytes));
+                let _ = sockets::write_all(&stream, &bytes, Some(CLIENT_TIMEOUT));
                 break;
             }
         };
@@ -537,14 +540,11 @@ fn handle_connection(
             None => request.version == "HTTP/1.0",
         };
         let label = format!("{} {}", request.method, request.target);
-        let mut conn = match request.into_conn() {
-            Value::Map(m) => Rc::unwrap_or_clone(m),
-            _ => unreachable!(),
-        };
+        let mut conn = request.into_conn().into_map().unwrap_or_default();
         conn.insert("remote_addr".into(), Value::string(peer));
         conn.insert("socket".into(), socket.clone());
         let outcome = rt.call_ref(handler, &[Value::map(conn)]);
-        let response = match outcome {
+        let response = match outcome.as_ref() {
             Ok(Value::Map(conn)) => {
                 if conn.get("sent").is_some_and(Value::is_truthy) {
                     // The handler wrote (and may have streamed) its own response.
@@ -554,7 +554,7 @@ fn handle_connection(
                     || header_map(conn.get("resp_headers"))
                         .get("connection")
                         .is_some_and(|c| c.to_string().eq_ignore_ascii_case("close"));
-                (response_bytes(&conn, head_only, close)?, close)
+                (response_bytes(conn, head_only, close)?, close)
             }
             other => {
                 match &other {
@@ -574,13 +574,7 @@ fn handle_connection(
             }
         };
         let (bytes, close) = response;
-        if blocking(|| {
-            let mut writer = &*stream;
-            writer.write_all(&bytes).and_then(|_| writer.flush())
-        })
-        .is_err()
-            || close
-        {
+        if sockets::write_all(&stream, &bytes, Some(CLIENT_TIMEOUT)).is_err() || close {
             break;
         }
     }
@@ -618,7 +612,7 @@ fn serve(rt: &mut dyn Runtime, target: &Value, handler: &Value) -> RyndResult<Va
     let mut fibers = Vec::new();
     let mut accepted = 0usize;
     while options.max_connections.is_none_or(|max| accepted < max) {
-        let (stream, peer) = match blocking(|| socket_listener.accept()) {
+        let (stream, peer) = match sockets::accept(&socket_listener) {
             Ok(pair) => pair,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 concurrency::sleep(Duration::from_millis(5))?;
@@ -631,11 +625,9 @@ fn serve(rt: &mut dyn Runtime, target: &Value, handler: &Value) -> RyndResult<Va
         let socket = sockets::register_stream(stream);
         let handler = handler.clone();
         let peer = peer.to_string();
-        let task = Value::Compiled {
-            name: Rc::from("http_connection"),
-            arity: 0,
-            func: Rc::new(move |rt, _, _| handle_connection(rt, &socket, &peer, &handler)),
-        };
+        let task = Value::compiled("http_connection", 0, move |rt, _, _| {
+            handle_connection(rt, &socket, &peer, &handler)
+        });
         // Unbounded servers detach connection fibers; bounded ones join them.
         fibers.push(concurrency::spawn_fiber(rt, task, !bounded)?);
         if !bounded {
@@ -767,14 +759,9 @@ fn http_request(opts: &BTreeMap<String, Value>) -> RyndResult<Value> {
 
     let addr = format!("{}:{}", url.host, url.port);
     let stream = sockets::connect(&addr, timeout)?;
-    let (status, version_reason, headers, body) = blocking(|| -> RyndResult<_> {
-        stream.set_read_timeout(Some(timeout)).map_err(io)?;
-        stream.set_write_timeout(Some(timeout)).map_err(io)?;
-        (&stream).write_all(&request).map_err(io)?;
-        let mut reader = Reader {
-            stream: Arc::new(stream),
-            buf: Vec::new(),
-        };
+    let (status, version_reason, headers, body) = (|| -> RyndResult<_> {
+        sockets::write_all(&stream, &request, Some(timeout)).map_err(io)?;
+        let mut reader = Reader::new(Arc::new(stream), Some(timeout));
         loop {
             let head = reader
                 .head()?
@@ -803,7 +790,7 @@ fn http_request(opts: &BTreeMap<String, Value>) -> RyndResult<Value> {
             };
             return Ok((status, phrase, headers, body));
         }
-    })?;
+    })()?;
     let mut response = BTreeMap::new();
     response.insert("status".into(), Value::Int(status));
     response.insert("reason".into(), Value::string(version_reason));
@@ -951,11 +938,7 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
             let mut conn = conn_map(&args[0], "plug_send")?;
             let stream = sockets::stream(&args[1])?;
             let bytes = response_bytes(&conn, false, true)?;
-            blocking(|| {
-                let mut writer = &*stream;
-                writer.write_all(&bytes).and_then(|_| writer.flush())
-            })
-            .map_err(io)?;
+            sockets::write_all(&stream, &bytes, Some(CLIENT_TIMEOUT)).map_err(io)?;
             sockets::close(&args[1])?;
             conn.insert("sent".into(), Value::Bool(true));
             Ok(Value::map(conn))
@@ -965,21 +948,15 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
 
         "read_http_request" => {
             let stream = sockets::stream(&args[0])?;
-            let mut reader = Reader {
-                stream,
-                buf: Vec::new(),
-            };
-            match blocking(|| reader.request()).map_err(crate::error::RyndError::from)? {
+            let mut reader = Reader::new(stream, None);
+            match reader.request().map_err(crate::error::RyndError::from)? {
                 Some(request) => {
                     if !reader.buf.is_empty() {
                         return Err(error(
                             "read_http_request(): pipelined requests need serve()",
                         ));
                     }
-                    let mut conn = match request.into_conn() {
-                        Value::Map(m) => Rc::unwrap_or_clone(m),
-                        _ => unreachable!(),
-                    };
+                    let mut conn = request.into_conn().into_map().unwrap_or_default();
                     conn.insert("socket".into(), args[0].clone());
                     Ok(Value::map(conn))
                 }

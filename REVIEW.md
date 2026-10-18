@@ -102,9 +102,53 @@ JSON checks pass 124 inputs and 20 rejections on each target. Source-line
 coverage is 92.35% (4,938/5,347), above the 90% gate.
 See [BENCHMARKS.md](BENCHMARKS.md) for new workload timings and baseline comparisons.
 
+## 2026-10-17 (later): interpreter speed, coroutine fibers, and resource limits
+
+**Interpreter.** Instructions are `Copy` with operands indexed into per-chunk
+tables (constants, names, patterns), so dispatch no longer clones reference
+counts. Frames keep their locals in slots of the shared operand stack, with
+arguments landing in place; tail calls move the callee and arguments down
+over the returning frame. Globals live in numbered slots that each machine
+links once per chunk, replacing a string hash per lookup. Integer arithmetic
+and comparisons have inline fast paths; integer literals are immediates, and
+`if` conditions and match guards fuse their comparison into the jump.
+`Value` shrank from 48 to 16 bytes: every non-scalar is one `Rc` (variants,
+closures, host functions), and builtins are a pointer into their static table,
+so dispatch to a builtin's module no longer searches by name. Generated Rust
+binds parameters by reference and skips unused self clones.
+
+**Fibers.** Fibers are now stackful coroutines on the program's thread
+(`vm/fiber.rs`: lazily committed stacks with guard regions, a short assembly
+context switch for x86-64 and AArch64, Linux and macOS). Sockets are
+non-blocking and park their fiber on a `poll` reactor; name resolution,
+processes, and stdin run on helper threads. Waits register on precise keys
+(a fiber, mailbox, or channel) instead of re-checking every parked fiber, and
+timers, I/O waits, and cancellation all wake the right fiber. Cancellation now
+interrupts socket waits. Script values never cross threads, which removes the
+`Send` impls the thread-per-fiber design needed (stores became thread-local).
+Scheduling stays cooperative, preserving the atomicity of code between waits.
+
+**Limits.** `Limits` bounds operations, wall time, allocation, string and
+collection size, call depth, source size, and live fibers per run, and
+`Interrupt` stops a run from another thread. `sandboxed()` applies
+`Limits::sandbox()`. Builtins that can expand shared structure check sizes
+before allocating, `attempt` cannot catch a limit, and the budget follows a
+run across its fibers' waits. Independently of limits, the parser bounds
+nesting at 200 levels, and deeply nested values drop, compare, and print
+without native recursion, so neither hostile source nor hostile data can
+overflow the stack.
+
+Bytecode listings name their operands (`GetGlobal(fib)`, `SubImm(1)`), and
+`Value` patterns for variants and callables changed shape (`Value::Variant(v)`
+with `v.name`/`v.values`, constructors `Value::compiled`, `Value::closure`,
+...); `Value::List`/`Map` payloads deref to `Vec`/`BTreeMap` as before.
+`tests/sandbox_test.rs` and `tests/fiber_runtime_test.rs` cover the new
+behavior; see [BENCHMARKS.md](BENCHMARKS.md) for timings.
+
 ## Development directions
 
 Future development can extend editor integration, formatting with comment
-preservation, lazy collection protocols, execution budgets, syntax nesting
-limits, and richer typed Rust adapters. Release packaging and a project license
-are distribution decisions.
+preservation, lazy collection protocols, optional preemption between calls,
+non-blocking connects without a helper thread, fiber support on more
+platforms, and richer typed Rust adapters. Release packaging and a project
+license are distribution decisions.

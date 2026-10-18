@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-pub const BUILTINS: &[(&str, usize)] = &[
+pub static BUILTINS: &[(&str, usize)] = &[
     ("words", 1),
     ("grep", 2),
     ("replace", 3),
@@ -171,12 +171,18 @@ pub fn slugify(text: &str) -> String {
     }
     out
 }
+/// String and list arguments are charged to the run's budget by size.
 fn text(value: &Value) -> RyndResult<&str> {
-    <&str>::try_from(value)
+    let text = <&str>::try_from(value)?;
+    super::safety::charge(text.len() as u64 / 64)?;
+    Ok(text)
 }
 fn list(value: &Value) -> RyndResult<&[Value]> {
     match value {
-        Value::List(items) => Ok(items),
+        Value::List(items) => {
+            super::safety::charge(items.len() as u64)?;
+            Ok(items)
+        }
         _ => Err(error("Expected list")),
     }
 }
@@ -220,9 +226,19 @@ pub fn call(rt: &mut dyn Runtime, name: &str, args: &[Value]) -> RyndResult<Valu
                     .collect(),
             ))
         }
-        "replace" => Ok(Value::string(
-            text(&args[0])?.replace(text(&args[1])?, text(&args[2])?),
-        )),
+        "replace" => {
+            let (source, from, to) = (text(&args[0])?, text(&args[1])?, text(&args[2])?);
+            if to.len() > from.len() && super::safety::limited() {
+                let matches = if from.is_empty() {
+                    source.chars().count() + 1
+                } else {
+                    source.matches(from).count()
+                };
+                let grown = matches.saturating_mul(to.len() - from.len());
+                super::safety::reserve_string(source.len().saturating_add(grown))?;
+            }
+            Ok(Value::string(source.replace(from, to)))
+        }
         "lower" => Ok(Value::string(text(&args[0])?.to_lowercase())),
         "upper" => Ok(Value::string(text(&args[0])?.to_uppercase())),
         "starts_with" => Ok(Value::Bool(text(&args[0])?.starts_with(text(&args[1])?))),

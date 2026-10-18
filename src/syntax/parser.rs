@@ -46,6 +46,9 @@ impl Precedence {
 pub struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
+    /// Syntax nesting at the cursor, bounded so that hostile input cannot
+    /// build a tree deep enough to overflow the stack in a later pass.
+    depth: usize,
 }
 
 impl Parser {
@@ -60,7 +63,28 @@ impl Parser {
                 .unwrap_or_else(|| crate::error::Span::new(1, 1));
             tokens.push(Token::new(TokenType::Eof, span));
         }
-        Self { tokens, cursor: 0 }
+        Self {
+            tokens,
+            cursor: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one more level of nesting.
+    fn nest(&mut self) -> RyndResult<()> {
+        self.depth += 1;
+        if self.depth > crate::vm::safety::MAX_SYNTAX_NESTING
+            || crate::vm::safety::stack_exhausted()
+        {
+            return Err(RyndError::ParseError {
+                message: format!(
+                    "Expression nested too deeply (limit {})",
+                    crate::vm::safety::MAX_SYNTAX_NESTING
+                ),
+                span: self.peek().span.clone(),
+            });
+        }
+        Ok(())
     }
 
     pub fn parse(&mut self) -> RyndResult<Program> {
@@ -217,6 +241,13 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> RyndResult<Pattern> {
+        self.nest()?;
+        let pattern = self.parse_pattern_inner();
+        self.depth -= 1;
+        pattern
+    }
+
+    fn parse_pattern_inner(&mut self) -> RyndResult<Pattern> {
         if self.match_token(&[TokenType::Minus]) {
             let token = self.advance();
             return match token.token_type {
@@ -328,6 +359,14 @@ impl Parser {
     }
 
     fn parse_expression(&mut self, precedence: Precedence) -> RyndResult<Expr> {
+        let outer = self.depth;
+        self.nest()?;
+        let expr = self.parse_expression_inner(precedence);
+        self.depth = outer;
+        expr
+    }
+
+    fn parse_expression_inner(&mut self, precedence: Precedence) -> RyndResult<Expr> {
         let mut left = self.parse_prefix()?;
 
         while !self.is_at_end() && precedence < Precedence::from_token(&self.peek().token_type) {
@@ -340,6 +379,8 @@ impl Parser {
             {
                 break;
             }
+            // Each operator in a chain deepens the (left-leaning) tree.
+            self.nest()?;
             left = self.parse_infix(left)?;
         }
 

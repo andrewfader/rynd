@@ -8,7 +8,6 @@
 //! Fibers switch only at blocking points, so a read-check-write sequence in
 //! one fiber is never interleaved with another fiber's writes.
 use super::{
-    concurrency::GroupId,
     runtime::{Runtime, error},
     value::Value,
 };
@@ -22,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{LazyLock, Mutex};
 
-pub const BUILTINS: &[(&str, usize)] = &[
+pub static BUILTINS: &[(&str, usize)] = &[
     ("store_open", 1),
     ("store_close", 1),
     ("store_put", 4),
@@ -79,7 +78,6 @@ impl Key {
 type Collection = BTreeMap<Key, Value>;
 
 struct Store {
-    owner: GroupId,
     path: Option<PathBuf>,
     log: Option<File>,
     collections: BTreeMap<String, Collection>,
@@ -88,14 +86,16 @@ struct Store {
     entries: usize,
 }
 
-/// SAFETY: a store's values are only touched under `STORES`' mutex by threads
-/// of its owning group, which run script code one at a time (see
-/// `concurrency`); `store()` rejects every other thread.
-struct Owned(Store);
-unsafe impl Send for Owned {}
-
 static NEXT_STORE: AtomicI64 = AtomicI64::new(1);
-static STORES: LazyLock<Mutex<HashMap<i64, Owned>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Ids of open stores on any thread, to explain a handle used elsewhere.
+static OPEN: LazyLock<Mutex<std::collections::HashSet<i64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+thread_local! {
+    /// A store holds script values, so it lives on the thread that opened it.
+    static STORES: std::cell::RefCell<HashMap<i64, Store>> =
+        std::cell::RefCell::new(HashMap::new());
+}
 
 fn io_error(path: &std::path::Path, e: std::io::Error) -> crate::error::RyndError {
     error(format!("store {}: {e}", path.display()))
@@ -113,7 +113,8 @@ impl Store {
     }
 
     fn apply(&mut self, line: &str) -> Result<(), String> {
-        let Ok(Value::Map(entry)) = super::json::parse(line) else {
+        let parsed = super::json::parse(line);
+        let Ok(Value::Map(entry)) = &parsed else {
             return Err("not a JSON object".into());
         };
         let (op, fields) = entry.iter().next().ok_or("empty entry")?;
@@ -155,7 +156,6 @@ impl Store {
 
     fn open(path: Option<PathBuf>) -> RyndResult<Store> {
         let mut store = Store {
-            owner: GroupId::current(),
             path: path.clone(),
             log: None,
             collections: BTreeMap::new(),
@@ -249,12 +249,10 @@ impl Store {
 
 fn handle(value: &Value) -> RyndResult<i64> {
     match value {
-        Value::Variant { name, values } if name == "Store" && values.len() == 1 => {
-            match values[0] {
-                Value::Int(id) => Ok(id),
-                _ => Err(error("Invalid Store handle")),
-            }
-        }
+        Value::Variant(v) if &*v.name == "Store" && v.values.len() == 1 => match v.values[0] {
+            Value::Int(id) => Ok(id),
+            _ => Err(error("Invalid Store handle")),
+        },
         other => Err(error(format!(
             "Expected Store, found {}",
             other.type_name()
@@ -264,16 +262,18 @@ fn handle(value: &Value) -> RyndResult<i64> {
 
 fn with_store<T>(value: &Value, f: impl FnOnce(&mut Store) -> RyndResult<T>) -> RyndResult<T> {
     let id = handle(value)?;
-    let mut stores = STORES.lock().unwrap_or_else(|p| p.into_inner());
-    let Owned(store) = stores
-        .get_mut(&id)
-        .ok_or_else(|| error("Store handle is closed or invalid"))?;
-    if !store.owner.is_current() {
-        return Err(error(
-            "This store belongs to another program thread; open it where it is used",
-        ));
-    }
-    f(store)
+    STORES.with(|stores| {
+        let mut stores = stores
+            .try_borrow_mut()
+            .map_err(|_| error("Store is already in use"))?;
+        match stores.get_mut(&id) {
+            Some(store) => f(store),
+            None if OPEN.lock().unwrap_or_else(|p| p.into_inner()).contains(&id) => Err(error(
+                "This store belongs to another program thread; open it where it is used",
+            )),
+            None => Err(error("Store handle is closed or invalid")),
+        }
+    })
 }
 
 fn name(value: &Value) -> RyndResult<String> {
@@ -297,21 +297,20 @@ pub fn call(_rt: &mut dyn Runtime, builtin: &str, args: &[Value]) -> RyndResult<
             let path = (!path.is_empty() && path != ":memory:").then(|| PathBuf::from(path));
             let store = Store::open(path)?;
             let id = NEXT_STORE.fetch_add(1, AtomicOrdering::Relaxed);
-            STORES
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(id, Owned(store));
+            STORES.with(|stores| stores.borrow_mut().insert(id, store));
+            OPEN.lock().unwrap_or_else(|p| p.into_inner()).insert(id);
             Ok(Value::variant("Store", vec![Value::Int(id)]))
         }
         "store_close" => {
             with_store(&args[0], |_| Ok(()))?;
             let id = handle(&args[0])?;
-            let removed = STORES.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-            if let Some(Owned(Store {
+            let removed = STORES.with(|stores| stores.borrow_mut().remove(&id));
+            OPEN.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+            if let Some(Store {
                 log: Some(log),
                 path: Some(path),
                 ..
-            })) = removed
+            }) = removed
             {
                 log.sync_all().map_err(|e| io_error(&path, e))?;
             }

@@ -73,42 +73,13 @@ fn test_value_type_names() {
     assert_eq!(Value::list(vec![]).type_name(), "list");
     assert_eq!(Value::map(BTreeMap::new()).type_name(), "map");
     assert_eq!(Value::variant("Custom", vec![]).type_name(), "variant");
+    assert_eq!(Value::function("f", 0, 0).type_name(), "function");
+    assert_eq!(Value::closure("c", 1, 0, vec![]).type_name(), "closure");
     assert_eq!(
-        Value::Function {
-            name: "f".into(),
-            arity: 0,
-            chunk_index: 0
-        }
-        .type_name(),
-        "function"
-    );
-    assert_eq!(
-        Value::Closure {
-            name: "c".into(),
-            arity: 1,
-            chunk_index: 0,
-            upvalues: vec![].into()
-        }
-        .type_name(),
-        "closure"
-    );
-    assert_eq!(
-        Value::Native {
-            name: "n".into(),
-            arity: 1,
-            func: |_| Ok(Value::Nil)
-        }
-        .type_name(),
+        Value::native("n", 1, |_| Ok(Value::Nil)).type_name(),
         "native_function"
     );
-    assert_eq!(
-        Value::Builtin {
-            name: "b".into(),
-            arity: 1
-        }
-        .type_name(),
-        "native_function"
-    );
+    assert_eq!(Value::Builtin(&("b", 1)).type_name(), "native_function");
 }
 
 #[test]
@@ -165,48 +136,17 @@ fn test_value_display_and_debug() {
         format!("{}", Value::variant("Some", vec![Value::Int(1)])),
         "Some(1)"
     );
+    assert_eq!(format!("{}", Value::function("foo", 2, 0)), "<fn foo/2>");
     assert_eq!(
-        format!(
-            "{}",
-            Value::Function {
-                name: "foo".into(),
-                arity: 2,
-                chunk_index: 0
-            }
-        ),
-        "<fn foo/2>"
-    );
-    assert_eq!(
-        format!(
-            "{}",
-            Value::Closure {
-                name: "bar".into(),
-                arity: 1,
-                chunk_index: 0,
-                upvalues: vec![].into()
-            }
-        ),
+        format!("{}", Value::closure("bar", 1, 0, vec![])),
         "<closure bar/1>"
     );
     assert_eq!(
-        format!(
-            "{}",
-            Value::Native {
-                name: "native".into(),
-                arity: 3,
-                func: |_| Ok(Value::Nil)
-            }
-        ),
+        format!("{}", Value::native("native", 3, |_| Ok(Value::Nil))),
         "<native fn native/3>"
     );
     assert_eq!(
-        format!(
-            "{}",
-            Value::Builtin {
-                name: "sum".into(),
-                arity: 1
-            }
-        ),
+        format!("{}", Value::Builtin(&("sum", 1))),
         "<native fn sum/1>"
     );
     assert_eq!(format!("{:?}", Value::Int(42)), "42");
